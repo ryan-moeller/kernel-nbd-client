@@ -1,0 +1,11 @@
+export_syms
+*.o
+*.ko
+*.so
+*.so.*
+*.pico
+*.gz
+machine
+i386
+x86
+opt_global.h
