@@ -45,6 +45,15 @@ static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
 static int g_nbd_debug = INT_MAX;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
     "Debug level");
+static int maxpayload = 256 * 1024;
+SYSCTL_INT(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
+    "Maximum payload size");
+static int sendspace = 1536 * 1024;
+SYSCTL_INT(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
+    "Default socket send buffer size");
+static int recvspace = 1536 * 1024;
+SYSCTL_INT(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
+    "Default socket receive buffer size");
 
 #define G_NBD_DEBUG(lvl, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
@@ -842,6 +851,33 @@ g_nbd_ctl_steal_socket(struct gctl_req *req)
 	return (so);
 }
 
+static int
+g_nbd_ctl_setup_socket(struct gctl_req *req, struct socket *so, size_t maxsz)
+{
+	size_t minspace;
+	int error;
+
+	minspace = sizeof (struct nbd_request) + maxsz;
+	if (sendspace < minspace) {
+		G_NBD_DEBUG(1, "kern.geom.nbd.sendspace -> %zd", minspace);
+		sendspace = minspace;
+	}
+	/* TODO: support structured replies */
+	minspace = sizeof (struct nbd_simple_reply) + maxsz;
+	if (recvspace < minspace) {
+		G_NBD_DEBUG(1, "kern.geom.nbd.recvspace -> %zd", minspace);
+		recvspace = minspace;
+	}
+	error = soreserve(so, sendspace, recvspace);
+	if (error != 0) {
+		gctl_error(req, "soreserve failed (%d)", error);
+		return (error);
+	}
+	so->so_snd.sb_flags |= SB_AUTOSIZE;
+	so->so_rcv.sb_flags |= SB_AUTOSIZE;
+	return (0);
+}
+
 static inline void
 bio_queue_init(struct bio_queue *queue)
 {
@@ -858,6 +894,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct socket *so;
 	struct g_geom *gp;
 	struct g_provider *pp;
+	size_t maxsz;
 	int unit;
 
 	g_topology_assert();
@@ -915,8 +952,19 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'maximum_payload' argument.");
 		return;
 	}
+	maxsz = *maxpayloadp;
+	if (maxsz > maxpayload) {
+		G_NBD_DEBUG(1, "limiting max payload size to %d", maxpayload);
+		maxsz = maxpayload;
+	}
 	so = g_nbd_ctl_steal_socket(req);
 	if (so == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		return;
+	}
+	if (g_nbd_ctl_setup_socket(req, so, maxsz) != 0) {
+		soclose(so);
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		return;
@@ -930,7 +978,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_flags = *flagsp;
 	sc->sc_minblocksize = *minbsp;
 	sc->sc_prefblocksize = *prefbsp;
-	sc->sc_maxpayload = *maxpayloadp;
+	sc->sc_maxpayload = maxsz;
 	sc->sc_unit = unit;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
