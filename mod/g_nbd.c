@@ -178,7 +178,7 @@ nbd_inflight_deliver(struct nbd_inflight *ni, int error)
 	G_NBD_LOGREQ(2, bp, "%s", __func__);
 	atomic_cmpset_int(&bp->bio_error, 0, error);
 	if (refcount_release(&ni->ni_refs)) {
-		g_io_deliver(bp, error);
+		g_io_deliver(bp, bp->bio_error);
 		uma_zfree(g_nbd_inflight_zone, ni);
 	}
 }
