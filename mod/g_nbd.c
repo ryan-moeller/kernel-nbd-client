@@ -39,8 +39,12 @@
 
 FEATURE(geom_nbd, "GEOM NBD module");
 
+SYSCTL_DECL(_kern_geom);
+static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOM NBD configuration");
 static int g_nbd_debug = INT_MAX;
-/* TODO: sysctl */
+SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
+    "Debug level");
 
 #define G_NBD_DEBUG(lvl, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
