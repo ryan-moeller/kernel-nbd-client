@@ -1,6 +1,8 @@
 export_syms
 *.o
 *.ko
+*.ko.debug
+*.ko.full
 *.so
 *.so.*
 *.pico
