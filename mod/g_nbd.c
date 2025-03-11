@@ -60,7 +60,7 @@ enum nbd_conn_state {
 	NBD_CONN_CLOSED,
 };
 
-/* TODO: support FLUSH properly */
+/* TODO: support FLUSH with multiple connections */
 struct nbd_inflight {
 	struct bio	*ni_bio;
 	uint64_t	ni_cookie;
