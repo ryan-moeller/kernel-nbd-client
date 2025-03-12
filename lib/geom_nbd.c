@@ -116,7 +116,8 @@ close:
 		return (-1);
 	}
 	client->socket = s;
-	client->server = strdup(ai->ai_canonname);
+	asprintf(__DECONST(char **, &client->server), "%s:%s", ai->ai_canonname,
+	    client->port);
 	assert(client->server != NULL); /* can't do much if ENOMEM */
 	freeaddrinfo(first_ai);
 	return (0);

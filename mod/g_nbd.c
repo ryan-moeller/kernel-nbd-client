@@ -1330,10 +1330,20 @@ g_nbd_start(struct bio *bp)
 		    (sc->sc_flags & NBD_FLAG_ROTATIONAL) != 0 ?
 		    DISK_RR_UNKNOWN : DISK_RR_NON_ROTATING))
 			return;
-		/* TODO: ident is supposed to be unique, prefix with server? */
-		/* TODO: default name is blank, show something? */
-		if (g_handleattr_str(bp, "GEOM::ident", sc->sc_name))
+		if (strcmp(bp->bio_attribute, "GEOM::ident") == 0) {
+			int error = 0;
+
+			memset(bp->bio_data, 0, bp->bio_length);
+			/* TODO: configurable ident format may be useful */
+			if (snprintf(bp->bio_data, bp->bio_length,
+			    "%s/%s", sc->sc_server, sc->sc_name) >=
+			    bp->bio_length)
+				error = EFAULT;
+			else
+				bp->bio_completed = bp->bio_length;
+			g_io_deliver(bp, error);
 			return;
+		}
 		if (sc->sc_description != NULL &&
 		    g_handleattr_str(bp, "GEOM::descr", sc->sc_description))
 			return;
