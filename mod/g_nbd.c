@@ -70,7 +70,6 @@ enum nbd_conn_state {
 	NBD_CONN_CLOSED,
 };
 
-/* TODO: support FLUSH with multiple connections */
 struct nbd_inflight {
 	struct bio	*ni_bio;
 	uint64_t	ni_cookie;
@@ -174,6 +173,11 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
+	switch (ni->ni_bio->bio_cmd) {
+	case BIO_DELETE:
+	case BIO_WRITE:
+		wakeup_one(ni);
+	}
 	if (last)
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(3, ni->ni_bio, "%s last=%s", __func__,
@@ -460,6 +464,13 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 	}
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
+	if (ni != NULL) {
+		switch (ni->ni_bio->bio_cmd) {
+		case BIO_DELETE:
+		case BIO_WRITE:
+			wakeup_one(ni);
+		}
+	}
 	if (last)
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(3, ni->ni_bio, "%s last=%s", __func__,
@@ -588,6 +599,32 @@ nbd_conn_recv(struct nbd_conn *nc)
 	bp->bio_completed = bp->bio_length;
 	bp->bio_resid = 0;
 	nbd_inflight_deliver(ni, 0);
+}
+
+static void
+g_nbd_flush_wait(struct g_nbd_softc *sc)
+{
+	struct nbd_conn *nc;
+	struct nbd_inflight *ni;
+
+	/* XXX: this is not optimal */
+restart:
+	mtx_lock(&sc->sc_conns_mtx);
+	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
+		mtx_lock(&nc->nc_inflight_mtx);
+		TAILQ_FOREACH(ni, &nc->nc_inflight, ni_inflight) {
+			switch (ni->ni_bio->bio_cmd) {
+			case BIO_DELETE:
+			case BIO_WRITE:
+				mtx_sleep(ni, &nc->nc_inflight_mtx, PDROP,
+				    "gnbd:flush", 0);
+				mtx_unlock(&sc->sc_conns_mtx);
+				goto restart;
+			}
+		}
+		mtx_unlock(&nc->nc_inflight_mtx);
+	}
+	mtx_unlock(&sc->sc_conns_mtx);
 }
 
 static inline bool
@@ -796,7 +833,8 @@ nbd_conn_sender(void *arg)
 			    PRIBIO | PDROP, "gnbd:queue", 0);
 			continue;
 		}
-		/* TODO: handle FLUSH constraints here? */
+		if (bp->bio_cmd == BIO_FLUSH && sc->sc_nconns > 1)
+			g_nbd_flush_wait(sc);
 		mtx_unlock(&sc->sc_queue_mtx);
 		nbd_conn_send(nc, bp);
 	}
@@ -1280,17 +1318,6 @@ g_nbd_start(struct bio *bp)
 	case BIO_FLUSH:
 		if ((sc->sc_flags & NBD_FLAG_SEND_FLUSH) == 0) {
 			G_NBD_LOGREQ(1, bp, "%s FLUSH unsupported", __func__);
-			g_io_deliver(bp, EOPNOTSUPP);
-			return;
-		}
-		/*
-		 * TODO: flush must wait for all in-flight write commands for
-		 * all connections (in this softc) to be completed before it can
-		 * be issued.
-		 */
-		if (sc->sc_nconns > 1) {
-			G_NBD_LOGREQ(1, bp, "%s FLUSH with multiple connections"
-			    " unimplemented", __func__);
 			g_io_deliver(bp, EOPNOTSUPP);
 			return;
 		}
