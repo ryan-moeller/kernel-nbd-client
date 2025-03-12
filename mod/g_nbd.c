@@ -657,7 +657,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	while (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
 		mtx_lock(&nc->nc_inflight_mtx);
 		if (TAILQ_FIRST(&nc->nc_inflight) != NULL) {
-			msleep(&nc->nc_inflight, &nc->nc_inflight_mtx,
+			mtx_sleep(&nc->nc_inflight, &nc->nc_inflight_mtx,
 			    PRIBIO | PDROP, "gnbd:inflight", 0);
 			continue;
 		}
@@ -792,7 +792,7 @@ nbd_conn_sender(void *arg)
 		mtx_lock(&sc->sc_queue_mtx);
 		bp = bio_queue_takefirst(&sc->sc_queue);
 		if (bp == NULL) {
-			msleep(&sc->sc_queue, &sc->sc_queue_mtx,
+			mtx_sleep(&sc->sc_queue, &sc->sc_queue_mtx,
 			    PRIBIO | PDROP, "gnbd:queue", 0);
 			continue;
 		}
