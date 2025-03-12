@@ -2,41 +2,41 @@
  * Copyright (c) 2025 Ryan Moeller
  *
  * SPDX-License-Identifier: BSD-2-Clause
- */ 
+ */
 
 #include <sys/param.h>
 #include <sys/bio.h>
 #include <sys/capsicum.h>
 #include <sys/file.h>
-#include <sys/kernel.h>
 #include <sys/kthread.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
+#include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/queue.h>
-#include <sys/sema.h>
+#include <sys/refcount.h>
 #include <sys/sched.h>
+#include <sys/sema.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sx.h>
 #include <sys/sysctl.h>
-#include <sys/systm.h>
 #include <sys/uio.h>
-#include <machine/atomic.h>
+
 #include <vm/uma.h>
 #include <vm/vm_page.h>
+
+#include <machine/atomic.h>
 
 #include <geom/geom.h>
 #include <geom/geom_dbg.h>
 #include <geom/geom_disk.h>
 
-#include "nbd-protocol.h"
-#include "sys/refcount.h"
-#include "sys/types.h"
 #include "g_nbd.h"
+#include "nbd-protocol.h"
 
 FEATURE(geom_nbd, "GEOM NBD module");
 

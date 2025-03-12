@@ -29,8 +29,8 @@
 #include "core/geom.h"
 #include "misc/subr.h"
 
-#include "nbd-protocol.h"
 #include "g_nbd.h"
+#include "nbd-protocol.h"
 
 #define NBD_DEFAULT_PORT	"10809"
 
