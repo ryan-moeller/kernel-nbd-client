@@ -27,6 +27,7 @@
 #include <sys/uio.h>
 #include <machine/atomic.h>
 #include <vm/uma.h>
+#include <vm/vm_page.h>
 
 #include <geom/geom.h>
 #include <geom/geom_dbg.h>
@@ -300,20 +301,68 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	if (cmd == NBD_CMD_WRITE) {
 		struct mbuf *d;
 
-		d = m_get(M_NOWAIT, MT_DATA);
-		if (d == NULL) {
-			m_free(m);
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENOMEM);
-			return;
+		/* TODO: BIO_VLIST? */
+		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+			struct mbuf *m_tail = m;
+			size_t page_offset = bp->bio_ma_offset;
+			size_t resid = bp->bio_length;
+			size_t len;
+
+			G_NBD_LOGREQ(5, bp, "%s unmapped write", __func__);
+			d = NULL;
+			for (int i = 0; resid > 0; i++) {
+				if (d == NULL) {
+					d = mb_alloc_ext_pgs(M_NOWAIT,
+					    nbd_inflight_free_mext, 0);
+					if (d == NULL) {
+						m_freem(m);
+						nbd_conn_remove_inflight_specific(
+						    nc, ni);
+						nbd_inflight_deliver(ni,
+						    ENOMEM);
+						return;
+					}
+					refcount_acquire(&ni->ni_refs);
+					d->m_ext.ext_arg1 = ni;
+					d->m_epg_1st_off = page_offset;
+				}
+				len = MIN(resid, PAGE_SIZE - page_offset);
+				d->m_epg_pa[d->m_epg_npgs++] =
+				    VM_PAGE_TO_PHYS(bp->bio_ma[i]);
+				d->m_epg_last_len = len;
+				d->m_len += len;
+				d->m_ext.ext_size += PAGE_SIZE;
+				MBUF_EXT_PGS_ASSERT_SANITY(d);
+				if (d->m_epg_npgs == MBUF_PEXT_MAX_PGS) {
+					m_tail->m_next = d;
+					m_tail = d;
+					needed += d->m_len;
+					d = NULL;
+				}
+				page_offset = 0;
+				resid -= len;
+			}
+			if (d != NULL) {
+				m_tail->m_next = d;
+				needed += d->m_len;
+			}
+		} else {
+			G_NBD_LOGREQ(5, bp, "%s mapped write", __func__);
+			d = m_get(M_NOWAIT, MT_DATA);
+			if (d == NULL) {
+				m_free(m);
+				nbd_conn_remove_inflight_specific(nc, ni);
+				nbd_inflight_deliver(ni, ENOMEM);
+				return;
+			}
+			refcount_acquire(&ni->ni_refs);
+			m_extadd(d, bp->bio_data, bp->bio_length,
+			    nbd_inflight_free_mext, ni, NULL, M_RDONLY,
+			    EXT_MOD_TYPE);
+			d->m_len = bp->bio_length;
+			needed += d->m_len;
+			m->m_next = d;
 		}
-		refcount_acquire(&ni->ni_refs);
-		/* TODO: handle BIO_UNMAPPED */
-		m_extadd(d, bp->bio_data, bp->bio_length,
-		    nbd_inflight_free_mext, ni, NULL, M_RDONLY, EXT_MOD_TYPE);
-		d->m_len = bp->bio_length;
-		needed += d->m_len;
-		m->m_next = d;
 	}
 	m->m_pkthdr.len = needed;
 	SOCK_SENDBUF_LOCK(so);
@@ -512,8 +561,29 @@ nbd_conn_recv(struct nbd_conn *nc)
 		KASSERT(uio.uio_resid == 0, ("%s soreceive returned short",
 		    __func__));
 		G_NBD_LOGREQ(3, bp, "%s received read data", __func__);
-		/* TODO: BIO_UNMAPPED? */
-		m_copydata(m, 0, bp->bio_length, bp->bio_data);
+		/* TODO: BIO_VLIST? */
+		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+			vm_offset_t vaddr;
+			size_t page_offset = bp->bio_ma_offset;
+			size_t resid = bp->bio_length;
+			size_t offset = 0;
+			size_t len;
+
+			G_NBD_LOGREQ(5, bp, "%s unmapped read", __func__);
+			for (int i = 0; resid > 0; i++) {
+				len = MIN(resid, PAGE_SIZE - page_offset);
+				vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(
+				    bp->bio_ma[i]));
+				m_copydata(m, offset, len, (char *)vaddr +
+				    page_offset);
+				page_offset = 0;
+				offset += len;
+				resid -= len;
+			}
+		} else {
+			G_NBD_LOGREQ(5, bp, "%s mapped read", __func__);
+			m_copydata(m, 0, bp->bio_length, bp->bio_data);
+		}
 		m_freem(m);
 	}
 	bp->bio_completed = bp->bio_length;
@@ -989,7 +1059,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	gp->softc = sc;
 	pp = g_new_providerf(gp, "%s", gp->name);
 	/* TODO: pp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE; */
-	/* TODO: pp->flags |= G_PF_ACCEPT_UNMAPPED; */
+	pp->flags |= G_PF_ACCEPT_UNMAPPED;
 	pp->mediasize = sc->sc_size;
 	pp->sectorsize = sc->sc_prefblocksize;
 	sc->sc_provider = pp;
@@ -1109,6 +1179,21 @@ bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
 	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
 }
 
+static inline bool
+g_nbd_limit(struct g_nbd_softc *sc, struct bio *bp)
+{
+	off_t maxsz = sc->sc_maxpayload;
+
+	if (bp->bio_length <= maxsz)
+		return (false);
+	bp->bio_length = maxsz;
+	/* TODO: BIO_VLIST? */
+	if ((bp->bio_flags & BIO_UNMAPPED) != 0)
+		bp->bio_ma_n =
+		    howmany(bp->bio_ma_offset + bp->bio_length, PAGE_SIZE);
+	return (true);
+}
+
 static inline void
 g_nbd_issue(struct g_nbd_softc *sc, struct bio *bp)
 {
@@ -1136,6 +1221,22 @@ g_nbd_done(struct bio *bp)
 	if (pbp->bio_children == pbp->bio_inbed)
 		g_io_deliver(pbp, pbp->bio_error);
 	g_destroy_bio(bp);
+}
+
+static inline void
+g_nbd_advance(struct bio *bp, off_t offset)
+{
+	bp->bio_offset += offset;
+	bp->bio_length -= offset;
+	/* TODO: BIO_VLIST? */
+	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+		bp->bio_ma += offset / PAGE_SIZE;
+		bp->bio_ma_offset += offset;
+		bp->bio_ma_offset %= PAGE_SIZE;
+		bp->bio_ma_n -= offset / PAGE_SIZE;
+	} else {
+		bp->bio_data += offset;
+	}
 }
 
 static void
@@ -1198,9 +1299,7 @@ g_nbd_start(struct bio *bp)
 			return;
 		}
 		for (;;) {
-			/* TODO: BIO_UNMAPPED */
-			if (bp1->bio_length > sc->sc_maxpayload) {
-				bp1->bio_length = sc->sc_maxpayload;
+			if (g_nbd_limit(sc, bp1)) {
 				offset += bp1->bio_length;
 				/* Grab next bio now to avoid race. */
 				bp2 = g_clone_bio(bp);
@@ -1214,10 +1313,7 @@ g_nbd_start(struct bio *bp)
 				break;
 			bp1 = bp2;
 			bp2 = NULL;
-			bp1->bio_offset += offset;
-			bp1->bio_length -= offset;
-			/* TODO: BIO_UNMAPPED */
-			bp1->bio_data += offset;
+			g_nbd_advance(bp1, offset);
 		}
 		return;
 	case BIO_GETATTR:
