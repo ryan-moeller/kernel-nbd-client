@@ -1058,8 +1058,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	/* TODO: validate arguments */
 	gp->softc = sc;
 	pp = g_new_providerf(gp, "%s", gp->name);
-	/* TODO: pp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE; */
-	pp->flags |= G_PF_ACCEPT_UNMAPPED;
+	pp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE |
+	    G_PF_ACCEPT_UNMAPPED;
 	pp->mediasize = sc->sc_size;
 	pp->sectorsize = sc->sc_prefblocksize;
 	sc->sc_provider = pp;
@@ -1199,7 +1199,6 @@ g_nbd_issue(struct g_nbd_softc *sc, struct bio *bp)
 {
 	bool first;
 
-	/* TODO: direct operation? */
 	mtx_lock(&sc->sc_queue_mtx);
 	first = bio_queue_empty(&sc->sc_queue);
 	bp->bio_driver1 = (void *)(uintptr_t)(sc->sc_seq++);
