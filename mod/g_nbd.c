@@ -43,7 +43,7 @@ FEATURE(geom_nbd, "GEOM NBD module");
 SYSCTL_DECL(_kern_geom);
 static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM NBD configuration");
-static int g_nbd_debug = INT_MAX;
+static int g_nbd_debug = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
     "Debug level");
 static int maxpayload = 256 * 1024;
