@@ -268,7 +268,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	int16_t cmd = bio_to_nbd_cmd(bp);
 	int error;
 
-	_Static_assert(sizeof *req <= MLEN, "request truncated");
+	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
 
@@ -288,7 +288,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 		nbd_inflight_deliver(ni, ENOMEM);
 		return;
 	}
-	m->m_len = sizeof *req;
+	m->m_len = sizeof(*req);
 	needed = m->m_len;
 	req = mtod(m, void *);
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
@@ -480,8 +480,8 @@ nbd_conn_recv(struct nbd_conn *nc)
 	int flags, error;
 
 	G_NBD_DEBUG(2, "%s", __func__);
-	memset(&uio, 0, sizeof uio);
-	uio.uio_resid = sizeof reply;
+	memset(&uio, 0, sizeof(uio));
+	uio.uio_resid = sizeof(reply);
 	SOCK_RECVBUF_LOCK(so);
 	while (sbavail(&so->so_rcv) < uio.uio_resid) {
 		if (!nbd_conn_recv_ok(nc, NULL)) {
@@ -504,7 +504,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 	}
 	KASSERT(uio.uio_resid == 0, ("soreceive returned short"));
 	G_NBD_DEBUG(3, "%s received reply", __func__);
-	m_copydata(m, 0, sizeof reply, (void *)&reply);
+	m_copydata(m, 0, sizeof(reply), (void *)&reply);
 	m_freem(m);
 	nbd_simple_reply_ntoh(&reply);
 	if (!nbd_simple_reply_is_valid(&reply)) {
@@ -530,7 +530,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	if (bp->bio_cmd == BIO_READ) {
-		memset(&uio, 0, sizeof uio);
+		memset(&uio, 0, sizeof(uio));
 		uio.uio_resid = bp->bio_length;
 		SOCK_RECVBUF_LOCK(so);
 		while (sbavail(&so->so_rcv) < uio.uio_resid) {
@@ -620,7 +620,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	struct mbuf *m;
 	int error;
 
-	_Static_assert(sizeof *req <= MLEN, "request truncated");
+	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
 
 	G_NBD_DEBUG(2, "%s", __func__);
 	m = m_gethdr(M_NOWAIT, MT_DATA);
@@ -628,10 +628,10 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 		atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 		return;
 	}
-	m->m_len = sizeof *req;
+	m->m_len = sizeof(*req);
 	m->m_pkthdr.len = m->m_len;
 	req = mtod(m, void *);
-	memset(req, 0, sizeof *req);
+	memset(req, 0, sizeof(*req));
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
 	SOCK_SENDBUF_LOCK(so);
@@ -847,7 +847,7 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	if (!first && SLIST_EMPTY_ATOMIC(&sc->sc_connections))
 		return;
 
-	nc = g_malloc(sizeof *nc, M_WAITOK | M_ZERO);
+	nc = g_malloc(sizeof(*nc), M_WAITOK | M_ZERO);
 	nc->nc_softc = sc;
 	nc->nc_socket = so;
 	nc->nc_state = NBD_CONN_CONNECTED;
@@ -882,12 +882,12 @@ g_nbd_ctl_steal_socket(struct gctl_req *req)
 	int *sp;
 	int error;
 
-	tidp = gctl_get_paraml(req, "thread", sizeof *tidp);
+	tidp = gctl_get_paraml(req, "thread", sizeof(*tidp));
 	if (tidp == NULL) {
 		gctl_error(req, "No 'thread' argument.");
 		return (NULL);
 	}
-	sp = gctl_get_paraml(req, "socket", sizeof *sp);
+	sp = gctl_get_paraml(req, "socket", sizeof(*sp));
 	if (sp == NULL) {
 		gctl_error(req, "No 'socket' argument.");
 		return (NULL);
@@ -927,13 +927,13 @@ g_nbd_ctl_setup_socket(struct gctl_req *req, struct socket *so, size_t maxsz)
 	size_t minspace;
 	int error;
 
-	minspace = sizeof (struct nbd_request) + maxsz;
+	minspace = sizeof(struct nbd_request) + maxsz;
 	if (sendspace < minspace) {
 		G_NBD_DEBUG(1, "kern.geom.nbd.sendspace -> %zd", minspace);
 		sendspace = minspace;
 	}
 	/* TODO: support structured replies */
-	minspace = sizeof (struct nbd_simple_reply) + maxsz;
+	minspace = sizeof(struct nbd_simple_reply) + maxsz;
 	if (recvspace < minspace) {
 		G_NBD_DEBUG(1, "kern.geom.nbd.recvspace -> %zd", minspace);
 		recvspace = minspace;
@@ -986,28 +986,28 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	server = gctl_get_asciiparam(req, "server");
 	name = gctl_get_asciiparam(req, "name");
 	description = gctl_get_asciiparam(req, "description");
-	sizep = gctl_get_paraml(req, "size", sizeof *sizep);
+	sizep = gctl_get_paraml(req, "size", sizeof(*sizep));
 	if (sizep == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "No 'size' argument.");
 		return;
 	}
-	flagsp = gctl_get_paraml(req, "flags", sizeof *flagsp);
+	flagsp = gctl_get_paraml(req, "flags", sizeof(*flagsp));
 	if (flagsp == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "No 'flags' argument.");
 		return;
 	}
-	minbsp = gctl_get_paraml(req, "minimum_blocksize", sizeof *minbsp);
+	minbsp = gctl_get_paraml(req, "minimum_blocksize", sizeof(*minbsp));
 	if (minbsp == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "No 'minimum_blocksize' argument.");
 		return;
 	}
-	prefbsp = gctl_get_paraml(req, "preferred_blocksize", sizeof *prefbsp);
+	prefbsp = gctl_get_paraml(req, "preferred_blocksize", sizeof(*prefbsp));
 	if (prefbsp == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
@@ -1015,7 +1015,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	maxpayloadp = gctl_get_paraml(req, "maximum_payload",
-	    sizeof *maxpayloadp);
+	    sizeof(*maxpayloadp));
 	if (maxpayloadp == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
@@ -1039,7 +1039,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		free_unr(g_nbd_unit, unit);
 		return;
 	}
-	sc = g_malloc(sizeof *sc, M_WAITOK | M_ZERO);
+	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
 	sc->sc_server = strdup(server, M_GEOM);
 	sc->sc_name = strdup(name, M_GEOM);
 	if (description != NULL)
@@ -1128,7 +1128,7 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 	g_topology_assert();
 
 	G_NBD_DEBUG(2, "%s", __func__);
-	version = gctl_get_paraml(req, "version", sizeof *version);
+	version = gctl_get_paraml(req, "version", sizeof(*version));
 	if (version == NULL) {
 		gctl_error(req, "No 'version' argument.");
 		return;
@@ -1157,7 +1157,7 @@ g_nbd_init(struct g_class __unused *mp)
 	sx_init(&g_nbd_lock, "GEOM NBD connections");
 	g_nbd_unit = new_unrhdr(0, INT_MAX, NULL);
 	g_nbd_inflight_zone = uma_zcreate("nbd_inflight",
-	    sizeof (struct nbd_inflight), NULL, NULL, NULL, NULL,
+	    sizeof(struct nbd_inflight), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
 }
 
