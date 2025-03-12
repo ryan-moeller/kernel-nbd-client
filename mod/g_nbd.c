@@ -1150,8 +1150,18 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 	gctl_error(req, "Unknown verb.");
 }
 
+static int
+g_nbd_ctl_destroy(struct gctl_req *req __unused, struct g_class *mp __unused,
+    struct g_geom *gp)
+{
+	struct g_nbd_softc *sc = gp->softc;
+
+	g_nbd_destroy(sc);
+	return (EBUSY);
+}
+
 static void
-g_nbd_init(struct g_class __unused *mp)
+g_nbd_init(struct g_class *mp __unused)
 {
 	G_NBD_DEBUG(2, "%s", __func__);
 	sx_init(&g_nbd_lock, "GEOM NBD connections");
@@ -1162,11 +1172,10 @@ g_nbd_init(struct g_class __unused *mp)
 }
 
 static void
-g_nbd_fini(struct g_class __unused *mp)
+g_nbd_fini(struct g_class *mp __unused)
 {
-	/* TODO: ensure threads don't outlive the module */
-	KASSERT(g_nbd_nconns == 0, ("connections still running"));
 	G_NBD_DEBUG(2, "%s", __func__);
+	KASSERT(g_nbd_nconns == 0, ("connections still running"));
 	uma_zdestroy(g_nbd_inflight_zone);
 	delete_unrhdr(g_nbd_unit);
 	sx_destroy(&g_nbd_lock);
@@ -1343,6 +1352,7 @@ static struct g_class g_nbd_class = {
 	.name = G_NBD_CLASS_NAME,
 	.version = G_VERSION,
 	.ctlreq = g_nbd_ctl_config,
+	.destroy_geom = g_nbd_ctl_destroy,
 	.init = g_nbd_init,
 	.fini = g_nbd_fini,
 	.start = g_nbd_start,
