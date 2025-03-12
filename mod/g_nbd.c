@@ -82,6 +82,7 @@ struct nbd_conn {
 	struct g_nbd_softc	*nc_softc;
 	struct socket		*nc_socket;
 	enum nbd_conn_state	nc_state;
+	uint64_t		nc_seq;
 	TAILQ_HEAD(, nbd_inflight)	nc_inflight;
 	struct mtx		nc_inflight_mtx;
 	struct sema		nc_receiver_done;
@@ -98,7 +99,6 @@ struct g_nbd_softc {
 	uint32_t	sc_prefblocksize;
 	uint32_t	sc_maxpayload;
 	u_int		sc_unit;
-	uint64_t	sc_seq;
 	struct g_provider	*sc_provider;
 	struct bio_queue	sc_queue;
 	struct mtx	sc_queue_mtx;
@@ -156,7 +156,7 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 	if (ni == NULL)
 		return (NULL);
 	ni->ni_bio = bp;
-	ni->ni_cookie = (uintptr_t)bp->bio_driver1;
+	ni->ni_cookie = nc->nc_seq++;
 	ni->ni_refs = 1;
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_INSERT_TAIL(&nc->nc_inflight, ni, ni_inflight);
@@ -264,7 +264,6 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	struct nbd_inflight *ni;
 	struct mbuf *m;
 	size_t needed;
-	uint64_t seq = (uintptr_t)bp->bio_driver1;
 	uint16_t flags = 0; /* no command flags supported currently */
 	int16_t cmd = bio_to_nbd_cmd(bp);
 	int error;
@@ -295,7 +294,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->flags = htobe16(flags);
 	req->command = htobe16(cmd);
-	req->cookie = htobe64(seq);
+	req->cookie = htobe64(ni->ni_cookie);
 	req->offset = htobe64(bp->bio_offset);
 	req->length = htobe32(bp->bio_length);
 	if (cmd == NBD_CMD_WRITE) {
@@ -1201,7 +1200,6 @@ g_nbd_issue(struct g_nbd_softc *sc, struct bio *bp)
 
 	mtx_lock(&sc->sc_queue_mtx);
 	first = bio_queue_empty(&sc->sc_queue);
-	bp->bio_driver1 = (void *)(uintptr_t)(sc->sc_seq++);
 	bio_queue_insert_tail(&sc->sc_queue, bp);
 	mtx_unlock(&sc->sc_queue_mtx);
 	if (first)
