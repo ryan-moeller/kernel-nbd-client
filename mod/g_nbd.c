@@ -517,6 +517,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		m_freem(m);
 	}
 	bp->bio_completed = bp->bio_length;
+	bp->bio_resid = 0;
 	nbd_inflight_deliver(ni, 0);
 }
 
@@ -1108,12 +1109,42 @@ bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
 	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
 }
 
+static inline void
+g_nbd_issue(struct g_nbd_softc *sc, struct bio *bp)
+{
+	bool first;
+
+	/* TODO: direct operation? */
+	mtx_lock(&sc->sc_queue_mtx);
+	first = bio_queue_empty(&sc->sc_queue);
+	bp->bio_driver1 = (void *)(uintptr_t)(sc->sc_seq++);
+	bio_queue_insert_tail(&sc->sc_queue, bp);
+	mtx_unlock(&sc->sc_queue_mtx);
+	if (first)
+		wakeup_one(&sc->sc_queue);
+}
+
+static void
+g_nbd_done(struct bio *bp)
+{
+	struct bio *pbp;
+
+	pbp = bp->bio_parent;
+	atomic_cmpset_int(&pbp->bio_error, 0, bp->bio_error);
+	atomic_add_64(&pbp->bio_completed, bp->bio_completed);
+	atomic_add_int(&pbp->bio_inbed, 1);
+	if (pbp->bio_children == pbp->bio_inbed)
+		g_io_deliver(pbp, pbp->bio_error);
+	g_destroy_bio(bp);
+}
+
 static void
 g_nbd_start(struct bio *bp)
 {
 	struct g_geom *gp = bp->bio_to->geom;
 	struct g_nbd_softc *sc = gp->softc;
-	bool first;
+	struct bio *bp1, *bp2;
+	off_t offset;
 
 	G_NBD_LOGREQ(2, bp, "%s", __func__);
 	if (sc == NULL) {
@@ -1159,17 +1190,36 @@ g_nbd_start(struct bio *bp)
 		break;
 	case BIO_READ:
 	case BIO_WRITE:
-		/* TODO: aio for zpool create hangs? */
-		/* TODO: r/w fails with dd bs under sectorsize, not sure if ok */
-		/* TODO: see geom_disk.c for splitting bio for maxpayload */
-		if (bp->bio_length > sc->sc_maxpayload ||
-		    bp->bio_offset + bp->bio_length > sc->sc_size) {
-			/* XXX: should the truncated operation be allowed? */
-			G_NBD_LOGREQ(1, bp, "%s operation trucates", __func__);
-			g_io_deliver(bp, EIO);
+		offset = 0;
+		bp2 = NULL;
+		bp1 = g_clone_bio(bp);
+		if (bp1 == NULL) {
+			g_io_deliver(bp, ENOMEM);
 			return;
 		}
-		break;
+		for (;;) {
+			/* TODO: BIO_UNMAPPED */
+			if (bp1->bio_length > sc->sc_maxpayload) {
+				bp1->bio_length = sc->sc_maxpayload;
+				offset += bp1->bio_length;
+				/* Grab next bio now to avoid race. */
+				bp2 = g_clone_bio(bp);
+				if (bp2 == NULL)
+					bp->bio_error = ENOMEM;
+			}
+			bp1->bio_done = g_nbd_done;
+			bp1->bio_to = bp->bio_to;
+			g_nbd_issue(sc, bp1);
+			if (bp2 == NULL)
+				break;
+			bp1 = bp2;
+			bp2 = NULL;
+			bp1->bio_offset += offset;
+			bp1->bio_length -= offset;
+			/* TODO: BIO_UNMAPPED */
+			bp1->bio_data += offset;
+		}
+		return;
 	case BIO_GETATTR:
 		if (g_handleattr_int(bp, "GEOM::candelete",
 		    (sc->sc_flags & NBD_FLAG_SEND_TRIM) != 0))
@@ -1193,14 +1243,7 @@ g_nbd_start(struct bio *bp)
 		g_io_deliver(bp, EOPNOTSUPP);
 		return;
 	}
-	/* TODO: direct operation? */
-	mtx_lock(&sc->sc_queue_mtx);
-	first = bio_queue_empty(&sc->sc_queue);
-	bp->bio_driver1 = (void *)(uintptr_t)(sc->sc_seq++);
-	bio_queue_insert_tail(&sc->sc_queue, bp);
-	mtx_unlock(&sc->sc_queue_mtx);
-	if (first)
-		wakeup_one(&sc->sc_queue);
+	g_nbd_issue(sc, bp);
 }
 
 static struct g_class g_nbd_class = {
