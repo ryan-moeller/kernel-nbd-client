@@ -204,12 +204,19 @@ struct nbd_info_block_size {
 
 #define NBD_REQUEST_MAGIC 0x25609513
 
-#define NBD_FLAG_HAS_FLAGS  (1 << 0)
-#define NBD_FLAG_READ_ONLY  (1 << 1)
-#define NBD_FLAG_SEND_FLUSH (1 << 2)
-#define NBD_FLAG_SEND_FUA   (1 << 3) /* FUA = force unit access */
-#define NBD_FLAG_ROTATIONAL (1 << 4) /* use elevator algorithm */
-#define NBD_FLAG_SEND_TRIM  (1 << 5)
+#define NBD_FLAG_HAS_FLAGS            (1 << 0)
+#define NBD_FLAG_READ_ONLY            (1 << 1)
+#define NBD_FLAG_SEND_FLUSH           (1 << 2)
+#define NBD_FLAG_SEND_FUA             (1 << 3) /* FUA = force unit access */
+#define NBD_FLAG_ROTATIONAL           (1 << 4) /* use elevator algorithm */
+#define NBD_FLAG_SEND_TRIM            (1 << 5)
+#define NBD_FLAG_SEND_WRITE_ZEROES    (1 << 6)
+#define NBD_FLAG_SEND_DF              (1 << 7)
+#define NBD_FLAG_CAN_MULTI_CONN       (1 << 8)
+#define NBD_FLAG_SEND_RESIZE          (1 << 9)
+#define NBD_FLAG_SEND_CACHE           (1 << 10)
+#define NBD_FLAG_SEND_FAST_ZERO       (1 << 11)
+#define NBD_FLAG_BLOCK_STATUS_PAYLOAD (1 << 12)
 
 enum {
 	NBD_CMD_READ        = 0,
