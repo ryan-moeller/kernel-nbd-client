@@ -369,7 +369,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	}
 	m->m_pkthdr.len = needed;
 	SOCK_SENDBUF_LOCK(so);
-	while (sbavail(&so->so_snd) < needed) {
+	while (sbspace(&so->so_snd) < needed) {
 		if (!nbd_conn_send_ok(nc, bp)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_LOGREQ(2, bp, "%s disconnecting", __func__);
@@ -380,8 +380,6 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 			return;
 		}
 		so->so_snd.sb_lowat = needed;
-		if (sbused(&so->so_snd) == 0)
-			break;
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
@@ -672,7 +670,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
 	SOCK_SENDBUF_LOCK(so);
-	while (sbavail(&so->so_snd) < m->m_len) {
+	while (sbspace(&so->so_snd) < m->m_len) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_DEBUG(2, "%s disconnecting", __func__);
