@@ -43,11 +43,12 @@ static void nbd_connect(struct gctl_req *req, unsigned flags);
 struct g_command class_commands[] = {
 	{ "connect", G_FLAG_LOADKLD, nbd_connect,
 	    {
+		{ 'c', "connections", "1", G_TYPE_NUMBER },
 		{ 'n', "name", "", G_TYPE_STRING },
 		{ 'p', "port", NBD_DEFAULT_PORT, G_TYPE_STRING },
 		G_OPT_SENTINEL
 	    },
-	    "[-v] [-n name] [-p port] host"
+	    "[-v] [-c num] [-n name] [-p port] host"
 	},
 	{ "disconnect", 0, NULL,
 	    {
@@ -507,33 +508,59 @@ static void
 nbd_connect(struct gctl_req *req, unsigned flags)
 {
 	struct nbd_client client = {};
+	int *sockets = NULL;
+	intmax_t nconns;
+	int nargs, nsockets;
 	long tid;
-	int nargs;
 
 	nargs = gctl_get_int(req, "nargs");
 	if (nargs != 1) {
 		gctl_error(req, "Invalid number of arguments.");
 		return;
 	}
+	nconns = gctl_get_intmax(req, "connections");
+	/* TODO: could check process limits for max */
+	if (nconns < 1) {
+		gctl_error(req, "Invalid number of connections.");
+		return;
+	}
+	nsockets = nconns;
 	thr_self(&tid);
 	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
 	client.host = gctl_get_ascii(req, "arg0");
 	client.port = gctl_get_ascii(req, "port");
-	/* TODO: multiple connections to parallelize commands */
-	if (nbd_client_connect(&client) != 0)
-		goto free;
-	gctl_ro_param(req, "socket", sizeof(client.socket), &client.socket);
-	gctl_ro_param(req, "server", -1, client.server);
-	/* These client properties may be overridden during negotiation. */
-	client.name = strdup(gctl_get_ascii(req, "name"));
-	if (client.name == NULL)
-		goto free;
+	/*
+	 * Default client properties that may be overridden by negotiation.
+	 */
 	client.minimum_blocksize = 1 << 9;	/* 512 */
 	client.preferred_blocksize = 1 << 12;	/* 4096 */
 	client.maximum_payload = 1 << 25;	/* 33554432 */
-	if (nbd_client_negotiate(&client) != 0)
+	sockets = malloc(sizeof(*sockets) * nsockets);
+	assert(sockets != NULL); /* can't do much if ENOMEM */
+	for (int i = 0; i < nsockets; i++) {
+		if (nbd_client_connect(&client) != 0) {
+			while (i-- > 0)
+				close(sockets[i]);
+			goto free;
+		}
+		sockets[i] = client.socket;
+		if (client.name == NULL) {
+			/* May be overridden during negotiation. */
+			client.name = strdup(gctl_get_ascii(req, "name"));
+			assert(client.name != NULL); /* can't do much */
+		}
+		if (nbd_client_negotiate(&client) != 0)
+			goto close;
+	}
+	if ((client.flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
+	    nsockets > 1) {
+		gctl_error(req, "Server does not allow multiple connections.");
 		goto close;
+	}
+	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
+	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
+	gctl_ro_param(req, "server", -1, client.server);
 	gctl_change_param(req, "name", -1, client.name);
 	if (client.description != NULL)
 		gctl_ro_param(req, "description", -1, client.description);
@@ -547,8 +574,10 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	    &client.maximum_payload);
 	gctl_issue(req);
 close:
-	close(client.socket); /* the kernel keeps its own ref */
+	for (int i = 0; i < nsockets; i++)
+		close(sockets[i]); /* the kernel keeps its own ref */
 free:
+	free(sockets);
 	free(__DECONST(char *, client.server));
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));

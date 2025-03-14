@@ -825,6 +825,12 @@ nbd_conn_sender(void *arg)
 
 	while (atomic_load_int(&nc->nc_state) == NBD_CONN_CONNECTED) {
 		mtx_lock(&sc->sc_queue_mtx);
+		/*
+		 * TODO: we're taking work before we know whether we will be
+		 * able to complete it (due to lack of buffer space).  There
+		 * could be another connection with more resources available.
+		 * We should be able to leave bios queued until we're ready.
+		 */
 		bp = bio_queue_takefirst(&sc->sc_queue);
 		if (bp == NULL) {
 			mtx_sleep(&sc->sc_queue, &sc->sc_queue_mtx,
@@ -867,8 +873,8 @@ nbd_conn_receiver(void *arg)
 
 	while (atomic_load_int(&nc->nc_state) != NBD_CONN_HARD_DISCONNECTING)
 		nbd_conn_recv(nc);
-	wakeup_one(&sc->sc_queue);
 	socantsendmore(so);
+	wakeup(&sc->sc_queue);
 	sema_post(&nc->nc_receiver_done);
 	kthread_exit();
 }
@@ -907,54 +913,80 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	sx_xunlock(&g_nbd_lock);
 }
 
-static struct socket *
-g_nbd_ctl_steal_socket(struct gctl_req *req)
+static struct socket **
+g_nbd_ctl_steal_sockets(struct gctl_req *req, int *nsocketsp)
 {
 	cap_rights_t rights;
 	struct thread *td;
-	struct socket *so;
+	struct socket **sockets, *so;
 	struct file *fp;
 	long *tidp;
-	int *sp;
-	int error;
+	int *nsp, *sp;
+	int nsockets, error;
 
 	tidp = gctl_get_paraml(req, "thread", sizeof(*tidp));
 	if (tidp == NULL) {
 		gctl_error(req, "No 'thread' argument.");
 		return (NULL);
 	}
-	sp = gctl_get_paraml(req, "socket", sizeof(*sp));
-	if (sp == NULL) {
-		gctl_error(req, "No 'socket' argument.");
+	nsp = gctl_get_paraml(req, "nsockets", sizeof(*nsp));
+	if (nsp == NULL) {
+		gctl_error(req, "No 'nsockets' argument.");
 		return (NULL);
 	}
+	nsockets = *nsp;
+	if (nsockets < 1) {
+		gctl_error(req, "Invalid 'nsockets' argument.");
+		return (NULL);
+	}
+	sp = gctl_get_paraml(req, "sockets", sizeof(*sp) * nsockets);
+	if (sp == NULL) {
+		gctl_error(req, "No 'sockets' argument.");
+		return (NULL);
+	}
+	sockets = g_malloc(sizeof(*sockets) * nsockets, M_WAITOK);
 	td = tdfind(*tidp, -1);
 	if (td == NULL) {
 		gctl_error(req, "Invalid 'thread' argument.");
 		return (NULL);
 	}
-	error = getsock(td, *sp, cap_rights_init_one(&rights, CAP_SOCK_CLIENT),
-	    &fp);
-	PROC_UNLOCK(td->td_proc);
-	if (error != 0) {
-		gctl_error(req, "Invalid 'socket' argument.");
-		return (NULL);
-	}
-	so = fp->f_data;
-	if (so->so_type != SOCK_STREAM) {
+	for (int i = 0; i < nsockets; i++) {
+		error = getsock(td, sp[i],
+		    cap_rights_init_one(&rights, CAP_SOCK_CLIENT), &fp);
+		if (error != 0) {
+			for (int j = 0; j < i; j++)
+				soclose(sockets[j]);
+			PROC_UNLOCK(td->td_proc);
+			g_free(sockets);
+			gctl_error(req, "Invalid socket (sockets[%d]=%d).",
+			    i, sp[i]);
+			return (NULL);
+		}
+		so = fp->f_data;
+		if (so->so_type != SOCK_STREAM) {
+			for (int j = 0; j < i; j++)
+				soclose(sockets[j]);
+			PROC_UNLOCK(td->td_proc);
+			fdrop(fp, td);
+			g_free(sockets);
+			gctl_error(req, "Invalid socket type (sockets[%d]=%d).",
+			    i, sp[i]);
+			return (NULL);
+		}
+		/*
+		 * Invalidate the file to take over the socket reference.
+		 * Otherwise, soclose() will disconnect the socket when the
+		 * process initiating this request ends and its file descriptors
+		 * are closed.
+		 */
+		fp->f_ops = &badfileops;
+		fp->f_data = NULL;
 		fdrop(fp, td);
-		gctl_error(req, "Invalid 'socket' type.");
-		return (NULL);
+		sockets[i] = so;
 	}
-	/*
-	 * Invalidate the file to take over the socket reference.  Otherwise,
-	 * soclose() will disconnect the socket when the process initiating this
-	 * request ends and its file descriptors are closed.
-	 */
-	fp->f_ops = &badfileops;
-	fp->f_data = NULL;
-	fdrop(fp, td);
-	return (so);
+	PROC_UNLOCK(td->td_proc);
+	*nsocketsp = nsockets;
+	return (sockets);
 }
 
 static int
@@ -997,11 +1029,11 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	const char *server, *name, *description;
 	uint64_t *sizep;
 	uint32_t *flagsp, *minbsp, *prefbsp, *maxpayloadp;
-	struct socket *so;
+	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
 	size_t maxsz;
-	int unit;
+	int unit, nsockets;
 
 	g_topology_assert();
 
@@ -1063,17 +1095,30 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		G_NBD_DEBUG(1, "limiting max payload size to %d", maxpayload);
 		maxsz = maxpayload;
 	}
-	so = g_nbd_ctl_steal_socket(req);
-	if (so == NULL) {
+	sockets = g_nbd_ctl_steal_sockets(req, &nsockets);
+	if (sockets == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		return;
 	}
-	if (g_nbd_ctl_setup_socket(req, so, maxsz) != 0) {
-		soclose(so);
+	if ((*flagsp & NBD_FLAG_CAN_MULTI_CONN) == 0 && nsockets > 1) {
+		for (int i = 0; i < nsockets; i++)
+			soclose(sockets[i]);
+		g_free(sockets);
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Server doesn't support multiple connections.");
 		return;
+	}
+	for (int i = 0; i < nsockets; i++) {
+		if (g_nbd_ctl_setup_socket(req, sockets[i], maxsz) != 0) {
+			for (i = 0; i < nsockets; i++)
+				soclose(sockets[i]);
+			g_free(sockets);
+			g_destroy_geom(gp);
+			free_unr(g_nbd_unit, unit);
+			return;
+		}
 	}
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
 	sc->sc_server = strdup(server, M_GEOM);
@@ -1099,8 +1144,9 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	pp->sectorsize = sc->sc_prefblocksize;
 	sc->sc_provider = pp;
 	g_error_provider(pp, 0);
-	/* TODO: multiple connections (NBD_FLAG_CAN_MULTI_CONN) */
-	g_nbd_add_conn(sc, so, gp->name, true);
+	for (int i = 0; i < nsockets; i++)
+		g_nbd_add_conn(sc, sockets[i], gp->name, true);
+	g_free(sockets);
 }
 
 static struct g_geom *
@@ -1129,7 +1175,7 @@ g_nbd_destroy(struct g_nbd_softc *sc)
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections)
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 	mtx_unlock(&sc->sc_conns_mtx);
-	wakeup_one(&sc->sc_queue);
+	wakeup(&sc->sc_queue);
 	/* The sender threads will take care of the cleanup. */
 }
 
