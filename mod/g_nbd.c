@@ -614,8 +614,8 @@ restart:
 			switch (ni->ni_bio->bio_cmd) {
 			case BIO_DELETE:
 			case BIO_WRITE:
-				mtx_sleep(ni, &nc->nc_inflight_mtx, PDROP,
-				    "gnbd:flush", 0);
+				mtx_sleep(ni, &nc->nc_inflight_mtx,
+				    PRIBIO | PDROP, "gnbd:flush", 0);
 				mtx_unlock(&sc->sc_conns_mtx);
 				goto restart;
 			}
