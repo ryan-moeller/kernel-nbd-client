@@ -12,7 +12,6 @@
 #include <assert.h>
 #include <err.h>
 #include <errno.h>
-#include <libgeom.h>
 #include <netdb.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -25,6 +24,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+
+#include <libgeom.h>
 
 #include "core/geom.h"
 #include "misc/subr.h"
