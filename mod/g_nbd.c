@@ -89,7 +89,8 @@ struct nbd_conn {
 };
 
 struct g_nbd_softc {
-	const char	*sc_server;
+	const char	*sc_host;
+	const char	*sc_port;
 	const char	*sc_name;
 	const char	*sc_description;
 	uint64_t	sc_size;
@@ -804,7 +805,8 @@ g_nbd_free(struct g_nbd_softc *sc)
 	mtx_destroy(&sc->sc_queue_mtx);
 	g_free(__DECONST(char *, sc->sc_description));
 	g_free(__DECONST(char *, sc->sc_name));
-	g_free(__DECONST(char *, sc->sc_server));
+	g_free(__DECONST(char *, sc->sc_port));
+	g_free(__DECONST(char *, sc->sc_host));
 	g_free(sc);
 	G_NBD_DEBUG(2, "%s completed", __func__);
 }
@@ -914,29 +916,20 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 }
 
 static struct socket **
-g_nbd_ctl_steal_sockets(struct gctl_req *req, int *nsocketsp)
+g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 {
 	cap_rights_t rights;
 	struct thread *td;
 	struct socket **sockets, *so;
 	struct file *fp;
 	long *tidp;
-	int *nsp, *sp;
-	int nsockets, error;
+	int *sp;
+	int error;
 
+	G_NBD_DEBUG(2, "%s", __func__);
 	tidp = gctl_get_paraml(req, "thread", sizeof(*tidp));
 	if (tidp == NULL) {
 		gctl_error(req, "No 'thread' argument.");
-		return (NULL);
-	}
-	nsp = gctl_get_paraml(req, "nsockets", sizeof(*nsp));
-	if (nsp == NULL) {
-		gctl_error(req, "No 'nsockets' argument.");
-		return (NULL);
-	}
-	nsockets = *nsp;
-	if (nsockets < 1) {
-		gctl_error(req, "Invalid 'nsockets' argument.");
 		return (NULL);
 	}
 	sp = gctl_get_paraml(req, "sockets", sizeof(*sp) * nsockets);
@@ -985,7 +978,6 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int *nsocketsp)
 		sockets[i] = so;
 	}
 	PROC_UNLOCK(td->td_proc);
-	*nsocketsp = nsockets;
 	return (sockets);
 }
 
@@ -1026,12 +1018,13 @@ static void
 g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 {
 	struct g_nbd_softc *sc;
-	const char *server, *name, *description;
+	const char *host, *port, *name, *description;
 	uint64_t *sizep;
 	uint32_t *flagsp, *minbsp, *prefbsp, *maxpayloadp;
 	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
+	intmax_t *cp;
 	size_t maxsz;
 	int unit, nsockets;
 
@@ -1051,7 +1044,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "Device '%s' already exists.", pp->name);
 		return;
 	}
-	server = gctl_get_asciiparam(req, "server");
+	host = gctl_get_asciiparam(req, "host");
+	port = gctl_get_asciiparam(req, "port");
 	name = gctl_get_asciiparam(req, "name");
 	description = gctl_get_asciiparam(req, "description");
 	sizep = gctl_get_paraml(req, "size", sizeof(*sizep));
@@ -1095,7 +1089,21 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		G_NBD_DEBUG(1, "limiting max payload size to %d", maxpayload);
 		maxsz = maxpayload;
 	}
-	sockets = g_nbd_ctl_steal_sockets(req, &nsockets);
+	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
+	if (cp == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'connections' argument.");
+		return;
+	}
+	nsockets = *cp;
+	if (nsockets < 1) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'connections' argument.");
+		return;
+	}
+	sockets = g_nbd_ctl_steal_sockets(req, nsockets);
 	if (sockets == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
@@ -1121,7 +1129,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		}
 	}
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
-	sc->sc_server = strdup(server, M_GEOM);
+	sc->sc_host = strdup(host, M_GEOM);
+	sc->sc_port = strdup(port, M_GEOM);
 	sc->sc_name = strdup(name, M_GEOM);
 	if (description != NULL)
 		sc->sc_description = strdup(description, M_GEOM);
@@ -1145,8 +1154,9 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_provider = pp;
 	g_error_provider(pp, 0);
 	for (int i = 0; i < nsockets; i++)
-		g_nbd_add_conn(sc, sockets[i], gp->name, true);
+		g_nbd_add_conn(sc, sockets[i], gp->name, i == 0);
 	g_free(sockets);
+	gctl_set_param_err(req, "provider", pp->name, strlen(pp->name) + 1);
 }
 
 static struct g_geom *
@@ -1163,6 +1173,144 @@ g_nbd_find_geom(struct g_class *mp, const char *name)
 			break;
 	}
 	return (gp);
+}
+
+static void
+g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
+{
+	struct g_nbd_softc *sc;
+	struct g_geom *gp;
+	const char *name;
+	intmax_t *cp;
+	struct socket **sockets;
+	int *nsocketsp;
+	int nconns, nsockets;
+
+	g_topology_assert();
+
+	G_NBD_DEBUG(2, "%s", __func__);
+	name = gctl_get_asciiparam(req, "arg0");
+	if (name == NULL) {
+		gctl_error(req, "Missing device.");
+		return;
+	}
+	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
+	if (cp == NULL) {
+		gctl_error(req, "No 'connections' argument.");
+		return;
+	}
+	nconns = *cp;
+	if (nconns < 1) {
+		gctl_error(req, "Invalid 'connections' argument.");
+		return;
+	}
+	gp = g_nbd_find_geom(mp, name);
+	if (gp == NULL) {
+		gctl_error(req, "Device '%s' is invalid.", name);
+		return;
+	}
+	sc = gp->softc;
+	mtx_lock(&sc->sc_conns_mtx);
+	if (sc->sc_nconns == nconns) {
+		mtx_unlock(&sc->sc_conns_mtx);
+		return;
+	}
+	if (sc->sc_nconns > nconns) {
+		struct nbd_conn *nc;
+		int n = sc->sc_nconns;
+
+		/* TODO: scaling down is delivering errors, can we fix? */
+		SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
+			nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
+			if (--n == nconns)
+				break;
+		}
+		mtx_unlock(&sc->sc_conns_mtx);
+		wakeup(&sc->sc_queue);
+		/* The sender threads will take care of the cleanup. */
+		return;
+	}
+	mtx_unlock(&sc->sc_conns_mtx);
+	nsocketsp = gctl_get_paraml(req, "nsockets", sizeof(nsockets));
+	if (nsocketsp == NULL) {
+		gctl_error(req, "No 'nsockets' argument.");
+		return;
+	}
+	nsockets = *nsocketsp;
+	sockets = g_nbd_ctl_steal_sockets(req, nsockets);
+	if (sockets == NULL)
+		return;
+	for (int i = 0; i < nsockets; i++)
+		g_nbd_add_conn(sc, sockets[i], gp->name, false);
+	g_free(sockets);
+}
+
+static inline int
+set_info(struct gctl_req *req, const char *param, const void *p, size_t len)
+{
+	switch (gctl_set_param(req, param, p, len)) {
+	case EPERM:
+		gctl_error(req, "No write access %s argument", param);
+		return (EPERM);
+	case ENOSPC:
+		gctl_error(req, "Wrong length %s argument", param);
+		return (ENOSPC);
+	default:
+		return (0);
+	}
+}
+
+static void
+g_nbd_ctl_info(struct gctl_req *req, struct g_class *mp)
+{
+	struct g_nbd_softc *sc;
+	struct g_geom *gp;
+	const char *name;
+
+	g_topology_assert();
+
+	G_NBD_DEBUG(2, "%s", __func__);
+	name = gctl_get_asciiparam(req, "arg0");
+	if (name == NULL) {
+		gctl_error(req, "Missing device.");
+		return;
+	}
+	gp = g_nbd_find_geom(mp, name);
+	if (gp == NULL) {
+		gctl_error(req, "Device '%s' is invalid.", name);
+		return;
+	}
+	sc = gp->softc;
+	if (set_info(req, "name", sc->sc_name, strlen(sc->sc_name) + 1) != 0)
+		return;
+	if (sc->sc_description != NULL) {
+		if (set_info(req, "description", sc->sc_description,
+		    strlen(sc->sc_description) + 1) != 0)
+			return;
+	} else {
+		if (set_info(req, "description", "", 1) != 0)
+			return;
+	}
+	if (set_info(req, "host", sc->sc_host, strlen(sc->sc_host) + 1) != 0)
+		return;
+	if (set_info(req, "port", sc->sc_port, strlen(sc->sc_port) + 1) != 0)
+		return;
+	if (set_info(req, "size", &sc->sc_size, sizeof(sc->sc_size)) != 0)
+		return;
+	if (set_info(req, "flags", &sc->sc_flags, sizeof(sc->sc_flags)) != 0)
+		return;
+	if (set_info(req, "minblocksize", &sc->sc_minblocksize,
+	    sizeof(sc->sc_minblocksize)) != 0)
+		return;
+	if (set_info(req, "prefblocksize", &sc->sc_prefblocksize,
+	    sizeof(sc->sc_prefblocksize)) != 0)
+		return;
+	if (set_info(req, "maxpayload", &sc->sc_maxpayload,
+	    sizeof(sc->sc_maxpayload)) != 0)
+		return;
+	if (set_info(req, "nsockets", &sc->sc_nconns,
+	    sizeof(sc->sc_nconns)) != 0)
+		return;
 }
 
 static void
@@ -1223,11 +1371,17 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 	if (strcmp(verb, "connect") == 0) {
 		g_nbd_ctl_connect(req, mp);
 		return;
+	} else if (strcmp(verb, "scale") == 0) {
+		g_nbd_ctl_scale(req, mp);
+		return;
+	} else if (strcmp(verb, "info") == 0) {
+		g_nbd_ctl_info(req, mp);
+		return;
 	} else if (strcmp(verb, "disconnect") == 0) {
 		g_nbd_ctl_disconnect(req, mp);
 		return;
 	}
-	/* TODO: more verbs (status? rescue?) */
+	/* TODO: rescue? */
 
 	gctl_error(req, "Unknown verb.");
 }
@@ -1407,8 +1561,8 @@ g_nbd_start(struct bio *bp)
 			memset(bp->bio_data, 0, bp->bio_length);
 			/* TODO: configurable ident format may be useful */
 			if (snprintf(bp->bio_data, bp->bio_length,
-			    "%s/%s", sc->sc_server, sc->sc_name) >=
-			    bp->bio_length)
+			    "%s:%s/%s", sc->sc_host, sc->sc_port, sc->sc_name)
+			    >= bp->bio_length)
 				error = EFAULT;
 			else
 				bp->bio_completed = bp->bio_length;

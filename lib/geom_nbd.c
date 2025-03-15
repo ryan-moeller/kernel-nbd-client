@@ -39,6 +39,8 @@ uint32_t lib_version = G_LIB_VERSION;
 uint32_t version = G_NBD_VERSION;
 
 static void nbd_connect(struct gctl_req *req, unsigned flags);
+static void nbd_scale(struct gctl_req *req, unsigned flags);
+static void nbd_info(struct gctl_req *req, unsigned flags);
 
 /* TODO: connect to multiple given names, list, connect to all, tls */
 struct g_command class_commands[] = {
@@ -50,6 +52,17 @@ struct g_command class_commands[] = {
 		G_OPT_SENTINEL
 	    },
 	    "[-v] [-c num] [-n name] [-p port] host"
+	},
+	{ "scale", 0, nbd_scale,
+	    {
+		{ 'c', "connections", NULL, G_TYPE_NUMBER },
+		G_OPT_SENTINEL
+	    },
+	    "-c num prov"
+	},
+	{ "info", 0, nbd_info,
+	    { G_OPT_SENTINEL },
+	    "prov"
 	},
 	{ "disconnect", 0, NULL,
 	    {
@@ -65,7 +78,6 @@ struct nbd_client {
 	struct gctl_req *req;
 	const char *host;
 	const char *port;
-	const char *server;
 	const char *name;
 	const char *description;
 	uint64_t size;
@@ -80,14 +92,10 @@ static int
 nbd_client_connect(struct nbd_client *client)
 {
 	struct gctl_req *req = client->req;
-	struct addrinfo hints, *first_ai, *ai;
+	struct addrinfo *first_ai, *ai;
 	int s, on, error;
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_flags = AI_CANONNAME;
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	error = getaddrinfo(client->host, client->port, &hints, &first_ai);
+	error = getaddrinfo(client->host, client->port, NULL, &first_ai);
 	if (error != 0) {
 		gctl_error(req, "Failed to locate server (%s:%s): %s",
 		    client->host, client->port, gai_strerror(error));
@@ -118,9 +126,6 @@ close:
 		return (-1);
 	}
 	client->socket = s;
-	asprintf(__DECONST(char **, &client->server), "%s:%s", ai->ai_canonname,
-	    client->port);
-	assert(client->server != NULL); /* can't do much if ENOMEM */
 	freeaddrinfo(first_ai);
 	return (0);
 }
@@ -340,7 +345,7 @@ nbd_info_block_size_ntoh(struct nbd_info_block_size *bs)
  * TODO: optional TLS, structured replies
  */
 static int
-nbd_client_negotiate_options(struct nbd_client *client)
+nbd_client_negotiate_options(struct nbd_client *client, bool first)
 {
 	struct gctl_req *req = client->req;
 	uint8_t *buf, *p;
@@ -352,17 +357,18 @@ nbd_client_negotiate_options(struct nbd_client *client)
 	};
 	uint32_t namelen = strlen(client->name);
 	uint32_t be_namelen = htobe32(namelen);
-	uint16_t n_info_requests = nitems(info_requests);
+	uint16_t n_info_requests = first ? nitems(info_requests) : 1;
 	uint16_t be_n_info_requests = htobe16(n_info_requests);
 	size_t buflen = sizeof(be_namelen) + namelen +
-	    sizeof(be_n_info_requests) + sizeof(info_requests);
+	    sizeof(be_n_info_requests) +
+	    sizeof(info_requests[0]) * n_info_requests;
 
 	p = buf = malloc(buflen);
 	assert(buf != NULL); /* can't do much if ENOMEM */
 	p = mempcpy(p, &be_namelen, sizeof(be_namelen));
 	p = mempcpy(p, client->name, namelen);
 	p = mempcpy(p, &be_n_info_requests, sizeof(be_n_info_requests));
-	memcpy(p, info_requests, sizeof(info_requests));
+	memcpy(p, info_requests, sizeof(info_requests[0]) * n_info_requests);
 	if (nbd_client_send_option(client, NBD_OPTION_GO, buf, buflen) != 0) {
 		free(buf);
 		return (-1);
@@ -469,7 +475,7 @@ nbd_handshake_ntoh(struct nbd_handshake *handshake)
 }
 
 static int
-nbd_client_negotiate(struct nbd_client *client)
+nbd_client_negotiate(struct nbd_client *client, bool first)
 {
 	struct nbd_handshake handshake;
 	struct gctl_req *req = client->req;
@@ -496,7 +502,7 @@ nbd_client_negotiate(struct nbd_client *client)
 	else if (handshake.style == NBD_NEWSTYLE_MAGIC) {
 		if (nbd_client_newstyle_negotiation(client) != 0)
 			return (-1);
-		return (nbd_client_negotiate_options(client));
+		return (nbd_client_negotiate_options(client, first));
 	}
 	gctl_error(req, "Handshake failed: unknown style");
 	return (-1);
@@ -508,6 +514,7 @@ nbd_client_negotiate(struct nbd_client *client)
 static void
 nbd_connect(struct gctl_req *req, unsigned flags)
 {
+	char provider[PATH_MAX];
 	struct nbd_client client = {};
 	int *sockets = NULL;
 	intmax_t nconns;
@@ -551,7 +558,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 			client.name = strdup(gctl_get_ascii(req, "name"));
 			assert(client.name != NULL); /* can't do much */
 		}
-		if (nbd_client_negotiate(&client) != 0)
+		if (nbd_client_negotiate(&client, i == 0) != 0)
 			goto close;
 	}
 	if ((client.flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
@@ -559,9 +566,9 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Server does not allow multiple connections.");
 		goto close;
 	}
-	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
 	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
-	gctl_ro_param(req, "server", -1, client.server);
+	gctl_ro_param(req, "host", -1, client.host);
+	gctl_ro_param(req, "port", -1, client.port);
 	gctl_change_param(req, "name", -1, client.name);
 	if (client.description != NULL)
 		gctl_ro_param(req, "description", -1, client.description);
@@ -573,13 +580,153 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	    sizeof(client.preferred_blocksize), &client.preferred_blocksize);
 	gctl_ro_param(req, "maximum_payload", sizeof(client.maximum_payload),
 	    &client.maximum_payload);
+	gctl_rw_param(req, "provider", sizeof(provider), provider);
+	gctl_issue(req);
+	provider[sizeof(provider) - 1] = '\0';
+	puts(provider);
+close:
+	for (int i = 0; i < nsockets; i++)
+		close(sockets[i]); /* the kernel keeps its own ref */
+free:
+	free(sockets);
+	free(__DECONST(char *, client.name));
+	free(__DECONST(char *, client.description));
+}
+
+static void
+nbd_scale(struct gctl_req *req, unsigned flags)
+{
+	char name[PATH_MAX], host[PATH_MAX], port[32];
+	struct nbd_client client = {};
+	int *sockets = NULL;
+	intmax_t nconns;
+	uint32_t flags1;
+	int nargs, nsockets;
+	long tid;
+
+	nargs = gctl_get_int(req, "nargs");
+	if (nargs != 1) {
+		gctl_error(req, "Invalid number of arguments.");
+		return;
+	}
+	nconns = gctl_get_intmax(req, "connections");
+	/* TODO: could check process limits for max */
+	if (nconns < 1) {
+		gctl_error(req, "Invalid number of connections.");
+		return;
+	}
+	/* TODO: TLS */
+	gctl_change_param(req, "verb", -1, "info");
+	gctl_rw_param(req, "name", sizeof(name), name);
+	gctl_rw_param(req, "host", sizeof(host), host);
+	gctl_rw_param(req, "port", sizeof(port), port);
+	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
+	gctl_rw_param(req, "nsockets", sizeof(nsockets), &nsockets);
+	gctl_issue(req);
+	if (req->nerror != 0)
+		return;
+	if (req->error != NULL) {
+		if (strcmp(req->error, "Could not allocate memory") != 0)
+			free(req->error);
+		req->error = NULL;
+	}
+	gctl_change_param(req, "verb", -1, "scale");
+	gctl_delete_param(req, "name");
+	gctl_delete_param(req, "host");
+	gctl_delete_param(req, "port");
+	gctl_delete_param(req, "flags");
+	gctl_delete_param(req, "nsockets");
+	if ((flags1 & NBD_FLAG_CAN_MULTI_CONN) == 0 && nconns > 1) {
+		gctl_error(req, "Server does not allow multiple connections.");
+		return;
+	}
+	if (nsockets == nconns)
+		/* Nothing to do. */
+		return;
+	if (nsockets > nconns) {
+		/* Scale down. */
+		gctl_issue(req);
+		return;
+	}
+	nsockets = nconns - nsockets;
+	assert(nsockets > 0);
+	thr_self(&tid);
+	gctl_ro_param(req, "thread", sizeof(tid), &tid);
+	client.req = req;
+	client.name = strdup(name);
+	assert(client.name != NULL); /* can't do much if ENOMEM */
+	client.host = host;
+	client.port = port;
+	sockets = malloc(sizeof(*sockets) * nsockets);
+	assert(sockets != NULL); /* can't do much if ENOMEM */
+	for (int i = 0; i < nsockets; i++) {
+		if (nbd_client_connect(&client) != 0) {
+			while (i-- > 0)
+				close(sockets[i]);
+			goto free;
+		}
+		sockets[i] = client.socket;
+		if (nbd_client_negotiate(&client, false) != 0)
+			goto close;
+	}
+	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
+	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
 	gctl_issue(req);
 close:
 	for (int i = 0; i < nsockets; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
 	free(sockets);
-	free(__DECONST(char *, client.server));
+	/* Didn't ask for these, but in case we got them anyway... */
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));
+}
+
+static void
+nbd_info(struct gctl_req *req, unsigned flags)
+{
+	char description[PAGE_SIZE]; /* oof */
+	char name[PATH_MAX];
+	char host[PATH_MAX];
+	char port[32];
+	uint64_t size;
+	uint32_t flags1;
+	uint32_t minblocksize;
+	uint32_t prefblocksize;
+	uint32_t maxpayload;
+	u_int nsockets;
+	int nargs;
+
+	nargs = gctl_get_int(req, "nargs");
+	if (nargs != 1) {
+		gctl_error(req, "Invalid number of arguments.");
+		return;
+	}
+	gctl_rw_param(req, "name", sizeof(name), name);
+	gctl_rw_param(req, "host", sizeof(host), host);
+	gctl_rw_param(req, "port", sizeof(port), port);
+	gctl_rw_param(req, "description", sizeof(description), description);
+	gctl_rw_param(req, "size", sizeof(size), &size);
+	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
+	gctl_rw_param(req, "minblocksize", sizeof(minblocksize), &minblocksize);
+	gctl_rw_param(req, "prefblocksize", sizeof(prefblocksize),
+	    &prefblocksize);
+	gctl_rw_param(req, "maxpayload", sizeof(maxpayload), &maxpayload);
+	gctl_rw_param(req, "nsockets", sizeof(nsockets), &nsockets);
+	gctl_issue(req);
+	name[sizeof(name) - 1] = '\0';
+	description[sizeof(description) - 1] = '\0';
+	host[sizeof(host) - 1] = '\0';
+	port[sizeof(port) - 1] = '\0';
+	printf("Name: %s\n", name);
+	printf("Description: %s\n", description);
+	printf("Host: %s\n", host);
+	printf("Port: %s\n", port);
+	printf("Size: %zd\n", size);
+	/* TODO: decode flags */
+	printf("Flags: 0x%08x\n", flags1);
+	printf("Minimum block size: %u\n", minblocksize);
+	printf("Preferred block size: %u\n", prefblocksize);
+	printf("Maximum payload: %u\n", maxpayload);
+	printf("Number of connections: %u\n", nsockets);
 }
