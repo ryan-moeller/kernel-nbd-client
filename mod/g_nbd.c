@@ -146,7 +146,7 @@ bio_cmd_str(struct bio *bp)
 	}
 }
 
-static struct nbd_inflight *
+static inline struct nbd_inflight *
 nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 {
 	struct nbd_inflight *ni;
@@ -185,7 +185,7 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 	    last ? "true" : "false");
 }
 
-static void
+static inline void
 nbd_inflight_deliver(struct nbd_inflight *ni, int error)
 {
 	struct bio *bp = ni->ni_bio;
@@ -703,7 +703,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 }
 
-static void
+static inline void
 nbd_conn_close(struct nbd_conn *nc)
 {
 	struct socket *so = nc->nc_socket;
@@ -713,7 +713,7 @@ nbd_conn_close(struct nbd_conn *nc)
 	soclose(so);
 }
 
-static void
+static inline void
 nbd_conn_drain_inflight(struct nbd_conn *nc)
 {
 	struct nbd_inflight *ni;
@@ -738,7 +738,7 @@ bio_queue_takefirst(struct bio_queue *queue)
 	return (bp);
 }
 
-static void
+static inline void
 g_nbd_drain_queue(struct g_nbd_softc *sc)
 {
 	struct bio *bp;
@@ -750,7 +750,7 @@ g_nbd_drain_queue(struct g_nbd_softc *sc)
 	mtx_unlock(&sc->sc_queue_mtx);
 }
 
-static bool
+static inline bool
 g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 {
 	bool empty;
@@ -786,7 +786,7 @@ bio_queue_empty(struct bio_queue *queue)
 	return (TAILQ_FIRST(queue) == NULL);
 }
 
-static void
+static inline void
 g_nbd_free(struct g_nbd_softc *sc)
 {
 	struct g_geom *gp = sc->sc_provider->geom;
@@ -1159,7 +1159,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	gctl_set_param_err(req, "provider", pp->name, strlen(pp->name) + 1);
 }
 
-static struct g_geom *
+static inline struct g_geom *
 g_nbd_find_geom(struct g_class *mp, const char *name)
 {
 	struct g_nbd_softc *sc;
@@ -1313,7 +1313,7 @@ g_nbd_ctl_info(struct gctl_req *req, struct g_class *mp)
 		return;
 }
 
-static void
+static inline void
 g_nbd_destroy(struct g_nbd_softc *sc)
 {
 	struct nbd_conn *nc;
