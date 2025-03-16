@@ -105,6 +105,7 @@ struct g_nbd_softc {
 	SLIST_HEAD(, nbd_conn)	sc_connections;
 	u_int		sc_nconns;
 	struct mtx	sc_conns_mtx;
+	struct sx	sc_flush_lock;
 };
 
 #define G_NBD_PROC_NAME "gnbd"
@@ -262,11 +263,11 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 }
 
 static void
-nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
+nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
 	struct socket *so = nc->nc_socket;
+	struct bio *bp = ni->ni_bio;
 	struct nbd_request *req;
-	struct nbd_inflight *ni;
 	struct mbuf *m;
 	size_t needed;
 	uint16_t flags = 0; /* no command flags supported currently */
@@ -278,15 +279,6 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	    bio_cmd_str(bp), bp->bio_cmd));
 
 	G_NBD_LOGREQ(2, bp, "%s", __func__);
-	/*
-	 * Put the bio in the inflight queue before sending the request to
-	 * avoid racing with the receiver thread.
-	 */
-	ni = nbd_conn_enqueue_inflight(nc, bp);
-	if (ni == NULL) {
-		g_io_deliver(bp, ENOMEM);
-		return;
-	}
 	m = m_gethdr(M_NOWAIT, MT_DATA);
 	if (m == NULL) {
 		nbd_conn_remove_inflight_specific(nc, ni);
@@ -606,20 +598,6 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct nbd_conn *nc;
 	struct nbd_inflight *ni;
 
-	/*
-	 * XXX: this is not optimal
-	 *
-	 * TODO:
-	 *
-	 * - Do not block g_nbd_issue() from queueing incoming bios, only
-	 *   nbd_conn_sender() from taking anything off the queue.
-	 *
-	 * - Make sure every bio is on either the queue or an inflight list at
-	 *   all times so we do not miss anything that needs to be flushed.
-	 *   This means the bio must be on the inflight list before unlocking
-	 *   the queue upon its removal.
-	 */
-	mtx_assert(&sc->sc_queue_mtx, MA_OWNED);
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 		mtx_lock(&nc->nc_inflight_mtx);
@@ -814,6 +792,7 @@ g_nbd_free(struct g_nbd_softc *sc)
 	g_wither_geom(gp, ENXIO);
 	g_topology_unlock();
 	free_unr(g_nbd_unit, sc->sc_unit);
+	sx_destroy(&sc->sc_flush_lock);
 	mtx_destroy(&sc->sc_conns_mtx);
 	mtx_destroy(&sc->sc_queue_mtx);
 	g_free(__DECONST(char *, sc->sc_description));
@@ -830,6 +809,7 @@ nbd_conn_sender(void *arg)
 	struct nbd_conn *nc = arg;
 	struct g_nbd_softc *sc = nc->nc_softc;
 	struct socket *so = nc->nc_socket;
+	struct nbd_inflight *ni;
 	struct bio *bp;
 
 	G_NBD_DEBUG(2, "%s", __func__);
@@ -839,23 +819,62 @@ nbd_conn_sender(void *arg)
 	thread_unlock(curthread);
 
 	while (atomic_load_int(&nc->nc_state) == NBD_CONN_CONNECTED) {
-		mtx_lock(&sc->sc_queue_mtx);
 		/*
 		 * TODO: we're taking work before we know whether we will be
 		 * able to complete it (due to lack of buffer space).  There
 		 * could be another connection with more resources available.
 		 * We should be able to leave bios queued until we're ready.
+		 * Issue is we only wakeup one thread.
 		 */
+		mtx_lock(&sc->sc_queue_mtx);
 		bp = bio_queue_takefirst(&sc->sc_queue);
 		if (bp == NULL) {
 			mtx_sleep(&sc->sc_queue, &sc->sc_queue_mtx,
 			    PRIBIO | PDROP, "gnbd:queue", 0);
 			continue;
 		}
-		if (bp->bio_cmd == BIO_FLUSH && sc->sc_nconns > 1)
-			g_nbd_flush_wait(sc);
 		mtx_unlock(&sc->sc_queue_mtx);
-		nbd_conn_send(nc, bp);
+		if (bp->bio_cmd == BIO_FLUSH && sc->sc_nconns > 1) {
+			/*
+			 *  We take the lock exclusively here to ensure the FLUSH
+			 *  is sent before subsequent bios by preventing
+			 *  concurrent sends.
+			 */
+			sx_xlock(&sc->sc_flush_lock);
+			g_nbd_flush_wait(sc);
+			/*
+			 * Put the bio in the inflight queue before sending the
+			 * request to avoid racing with the receiver thread.
+			 */
+			ni = nbd_conn_enqueue_inflight(nc, bp);
+			if (ni == NULL) {
+				sx_xunlock(&sc->sc_flush_lock);
+				g_io_deliver(bp, ENOMEM);
+				continue;
+			}
+			nbd_conn_send(nc, ni);
+			sx_xunlock(&sc->sc_flush_lock);
+		} else {
+			/*
+			 * Put the bio in the inflight queue before sending the
+			 * request to avoid racing with the receiver thread.
+			 */
+			if (sc->sc_nconns > 1) {
+				/*
+				 *  We share the lock here to allow concurrency
+				 *  across the connections.
+				 */
+				sx_slock(&sc->sc_flush_lock);
+				ni = nbd_conn_enqueue_inflight(nc, bp);
+				sx_sunlock(&sc->sc_flush_lock);
+			} else
+				ni = nbd_conn_enqueue_inflight(nc, bp);
+			if (ni == NULL) {
+				g_io_deliver(bp, ENOMEM);
+				continue;
+			}
+			nbd_conn_send(nc, ni);
+		}
 	}
 	if (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING)
 		nbd_conn_soft_disconnect(nc);
@@ -1157,6 +1176,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
 	SLIST_INIT(&sc->sc_connections);
 	mtx_init(&sc->sc_conns_mtx, "gnbd:connections", NULL, MTX_DEF);
+	sx_init(&sc->sc_flush_lock, "gnbd:flush");
 	/* TODO: validate arguments */
 	gp->softc = sc;
 	pp = g_new_providerf(gp, "%s", gp->name);
