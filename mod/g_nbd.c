@@ -606,6 +606,7 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct nbd_conn *nc;
 	struct nbd_inflight *ni;
 
+	mtx_assert(&sc->sc_queue_mtx, MA_OWNED);
 	/* XXX: this is not optimal */
 restart:
 	mtx_lock(&sc->sc_conns_mtx);
