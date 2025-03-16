@@ -606,19 +606,31 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct nbd_conn *nc;
 	struct nbd_inflight *ni;
 
+	/*
+	 * XXX: this is not optimal
+	 *
+	 * TODO:
+	 *
+	 * - Do not block g_nbd_issue() from queueing incoming bios, only
+	 *   nbd_conn_sender() from taking anything off the queue.
+	 *
+	 * - Make sure every bio is on either the queue or an inflight list at
+	 *   all times so we do not miss anything that needs to be flushed.
+	 *   This means the bio must be on the inflight list before unlocking
+	 *   the queue upon its removal.
+	 */
 	mtx_assert(&sc->sc_queue_mtx, MA_OWNED);
-	/* XXX: this is not optimal */
-restart:
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 		mtx_lock(&nc->nc_inflight_mtx);
+restart:
 		TAILQ_FOREACH(ni, &nc->nc_inflight, ni_inflight) {
 			switch (ni->ni_bio->bio_cmd) {
 			case BIO_DELETE:
 			case BIO_WRITE:
-				mtx_sleep(ni, &nc->nc_inflight_mtx,
-				    PRIBIO | PDROP, "gnbd:flush", 0);
-				mtx_unlock(&sc->sc_conns_mtx);
+				mtx_sleep(ni, &nc->nc_inflight_mtx, PRIBIO,
+				    "gnbd:flush", 0);
+				/* Have to start over, the lock was dropped. */
 				goto restart;
 			}
 		}
