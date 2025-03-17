@@ -133,17 +133,23 @@ close:
 static int
 nbd_client_send(struct nbd_client *client, const void *buf, size_t buflen)
 {
+	struct gctl_req *req = client->req;
 	ssize_t len;
 	int s = client->socket;
 
 	while ((len = send(s, buf, buflen, MSG_NOSIGNAL)) != buflen) {
-		if (len == -1) {
-			if (errno == EINTR)
-				continue;
-			gctl_error(client->req, "Connection failed: %s",
-			    strerror(errno));
+		if (len > 0) {
+			buf += len;
+			buflen -= len;
+			continue;
+		} else if (len == 0) {
+			gctl_error(req, "Connection closed.");
 			return (-1);
 		}
+		if (errno == EINTR)
+			continue;
+		gctl_error(req, "Connection failed: %s", strerror(errno));
+		return (-1);
 	}
 	return (0);
 }
@@ -151,17 +157,23 @@ nbd_client_send(struct nbd_client *client, const void *buf, size_t buflen)
 static int
 nbd_client_recv(struct nbd_client *client, void *buf, size_t buflen)
 {
+	struct gctl_req *req = client->req;
 	ssize_t len;
 	int s = client->socket;
 
 	while ((len = recv(s, buf, buflen, MSG_WAITALL)) != buflen) {
-		if (len == -1) {
-			if (errno == EINTR)
-				continue;
-			gctl_error(client->req, "Connection failed: %s",
-			    strerror(errno));
+		if (len > 0) {
+			buf += len;
+			buflen -= len;
+			continue;
+		} else if (len == 0) {
+			gctl_error(req, "Connection closed.");
 			return (-1);
 		}
+		if (errno == EINTR)
+			continue;
+		gctl_error(req, "Connection failed: %s", strerror(errno));
+		return (-1);
 	}
 	return (0);
 }
