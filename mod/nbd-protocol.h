@@ -19,6 +19,7 @@
  * server immedately transitions to the transmission phase.  The oldstyle
  * protocol is deprecated and unsupported.
  *
+ * Newstyle:
  * When the client connects, the server sends a handshake packet with the
  * handshake flags.  The client responds with its client flags, which must
  * include the FIXED_NEWSTYLE flag.
