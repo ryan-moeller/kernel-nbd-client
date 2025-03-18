@@ -761,6 +761,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 		atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 		return;
 	}
+	soshutdown(so, SHUT_WR);
 	while (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
 		mtx_lock(&nc->nc_inflight_mtx);
 		if (TAILQ_FIRST(&nc->nc_inflight) != NULL) {
