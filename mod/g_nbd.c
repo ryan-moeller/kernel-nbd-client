@@ -264,6 +264,32 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 	return (true);
 }
 
+static struct mbuf *
+nbd_request_mbuf(bool tls, struct nbd_request **reqp)
+{
+	const size_t needed = sizeof(**reqp);
+	struct mbuf *m;
+
+	_Static_assert(needed <= MLEN, "mapped request truncated");
+	_Static_assert(MLEN <= PAGE_SIZE, "unmapped request truncated");
+
+	if (tls) {
+		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
+		if (m == NULL)
+			return (NULL);
+		m->m_epg_last_len = needed;
+		m->m_ext.ext_size = PAGE_SIZE;
+		*reqp = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
+	} else {
+		m = m_get(M_NOWAIT, MT_DATA);
+		if (m == NULL)
+			return (NULL);
+		*reqp = mtod(m, void *);
+	}
+	m->m_len = needed;
+	return (m);
+}
+
 static void
 nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
@@ -277,38 +303,23 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	int error;
 	bool tls = nc->nc_softc->sc_tls;
 
-	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
 
 	G_NBD_LOGREQ(2, bp, "%s", __func__);
-	needed = sizeof(*req);
-	if (tls) {
-		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
-		if (m == NULL) {
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENOMEM);
-			return;
-		}
-		m->m_epg_last_len = needed;
-		m->m_ext.ext_size = PAGE_SIZE;
-		req = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
-	} else {
-		m = m_get(M_NOWAIT, MT_DATA);
-		if (m == NULL) {
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENOMEM);
-			return;
-		}
-		req = mtod(m, void *);
+	m = nbd_request_mbuf(tls, &req);
+	if (m == NULL) {
+		nbd_conn_remove_inflight_specific(nc, ni);
+		nbd_inflight_deliver(ni, ENOMEM);
+		return;
 	}
-	m->m_len = needed;
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->flags = htobe16(flags);
 	req->command = htobe16(cmd);
 	req->cookie = htobe64(ni->ni_cookie);
 	req->offset = htobe64(bp->bio_offset);
 	req->length = htobe32(bp->bio_length);
+	needed = sizeof(*req);
 	if (cmd == NBD_CMD_WRITE) {
 		struct mbuf *d;
 
@@ -714,33 +725,17 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	size_t needed;
 	int error;
 
-	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
-
 	G_NBD_DEBUG(2, "%s", __func__);
-	needed = sizeof(*req);
-	if (nc->nc_softc->sc_tls) {
-		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
-		if (m == NULL) {
-			atomic_store_int(&nc->nc_state,
-			    NBD_CONN_HARD_DISCONNECTING);
-			return;
-		}
-		m->m_epg_last_len = needed;
-		m->m_ext.ext_size = PAGE_SIZE;
-		req = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
-	} else {
-		m = m_get(M_NOWAIT, MT_DATA);
-		if (m == NULL) {
-			atomic_store_int(&nc->nc_state,
-			    NBD_CONN_HARD_DISCONNECTING);
-			return;
-		}
-		req = mtod(m, void *);
+	m = nbd_request_mbuf(nc->nc_softc->sc_tls, &req);
+	if (m == NULL) {
+		atomic_store_int(&nc->nc_state,
+		    NBD_CONN_HARD_DISCONNECTING);
+		return;
 	}
-	m->m_len = needed;
 	memset(req, 0, sizeof(*req));
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
+	needed = sizeof(*req);
 	SOCK_SENDBUF_LOCK(so);
 	while (sbspace(&so->so_snd) < needed) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
