@@ -582,15 +582,28 @@ nbd_conn_recv(struct nbd_conn *nc)
 		sbwait(so, SO_RCV);
 	}
 	SOCK_RECVBUF_UNLOCK(so);
-	flags = MSG_DONTWAIT;
-	error = soreceive(so, NULL, &uio, &m, NULL, &flags);
-	if (error != 0) {
-		G_NBD_DEBUG(1, "%s soreceive failed (%d)", __func__, error);
-		if (error != ENOMEM && error != EINTR && error != ERESTART)
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-		return;
-	}
-	KASSERT(uio.uio_resid == 0, ("soreceive returned short"));
+	m = NULL;
+	do {
+		struct mbuf *m1;
+
+		flags = MSG_DONTWAIT;
+		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
+		if (error != 0) {
+			G_NBD_DEBUG(1, "%s soreceive failed (%d)", __func__,
+			    error);
+			if (error != ENOMEM && error != EINTR &&
+			    error != ERESTART)
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
+			return;
+		}
+		KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
+		    ("%s soreceive truncated", __func__));
+		if (m == NULL)
+			m = m1;
+		else
+			m_cat(m, m1);
+	} while (uio.uio_resid > 0);
 	G_NBD_DEBUG(3, "%s received reply", __func__);
 	m_copydata(m, 0, sizeof(reply), (void *)&reply);
 	m_freem(m);
@@ -635,18 +648,28 @@ nbd_conn_recv(struct nbd_conn *nc)
 			sbwait(so, SO_RCV);
 		}
 		SOCK_RECVBUF_UNLOCK(so);
-		flags = MSG_DONTWAIT;
-		error = soreceive(so, NULL, &uio, &m, NULL, &flags);
-		if (error != 0) {
-			G_NBD_LOGREQ(1, bp, "%s soreceive failed (%d)",
-			    __func__, error);
-			/* TODO: any errors we can survive? */
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-			nbd_inflight_deliver(ni, error);
-			return;
-		}
-		KASSERT(uio.uio_resid == 0, ("%s soreceive returned short",
-		    __func__));
+		m = NULL;
+		do {
+			struct mbuf *m1;
+
+			flags = MSG_DONTWAIT;
+			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
+			if (error != 0) {
+				G_NBD_LOGREQ(1, bp, "%s soreceive failed (%d)",
+				    __func__, error);
+				/* TODO: any errors we can survive? */
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
+				nbd_inflight_deliver(ni, error);
+				return;
+			}
+			KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
+			    ("%s soreceive truncated", __func__));
+			if (m == NULL)
+				m = m1;
+			else
+				m_cat(m, m1);
+		} while (uio.uio_resid > 0);
 		G_NBD_LOGREQ(3, bp, "%s received read data", __func__);
 		/* TODO: BIO_VLIST? */
 		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
