@@ -264,75 +264,6 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 	return (true);
 }
 
-/*
- * Inspired by _rpc_copym_into_ext_pgs().
- */
-static struct mbuf *
-_nbd_copym_into_ext_pgs(struct mbuf *mp)
-{
-	struct mbuf *m, *m1, *m2, *mhead;
-	int tlen;
-
-	KASSERT((mp->m_flags & (M_EXT | M_EXTPG)) != (M_EXT | M_EXTPG),
-	    ("%s: first mbuf is an ext_pgs", __func__));
-	/*
-	 * Find the last non-ext_pgs mbuf and the total length of the
-	 * non-ext_pgs mbuf(s).  The first mbuf must always be a
-	 * non-ext_pgs mbuf.
-	 */
-	tlen = mp->m_len;
-	m1 = mp;
-	for (m = mp->m_next; m != NULL; m = m->m_next) {
-		if ((m->m_flags & M_EXTPG) != 0)
-			break;
-		tlen += m->m_len;
-		m1 = m;
-	}
-
-	/*
-	 * Copy the non-ext_pgs mbuf(s) into an ext_pgs mbuf list.
-	 */
-	m1->m_next = NULL;
-	mhead = mb_mapped_to_unmapped(mp, tlen, g_nbd_tlsmax, M_NOWAIT, &m1);
-
-	/*
-	 * Link the ext_pgs list onto the newly copied list and free up the
-	 * non-ext_pgs mbuf(s).
-	 */
-	m1->m_next = m;
-	m_freem(mp);
-
-	/*
-	 * Sanity check the resultant mbuf list.  Check for and remove any 0
-	 * length mbufs, since the KERN_TLS code expects no 0 length mbufs in
-	 * the list.
-	 */
-	m2 = NULL;
-	m1 = mhead;
-	while (m1 != NULL) {
-		KASSERT(m1->m_len >= 0, ("%s: negative m_len", __func__));
-		KASSERT((m1->m_flags & (M_EXT | M_EXTPG)) == (M_EXT | M_EXTPG),
-		    ("%s: non-unmapped mbuf in list", __func__));
-		if (m1->m_len == 0) {
-			if (m2 != NULL)
-				m2->m_next = m1->m_next;
-			else
-				m = m1->m_next;
-			m1->m_next = NULL;
-			m_free(m1);
-			if (m2 != NULL)
-				m1 = m2->m_next;
-			else
-				m1 = m;
-		} else {
-			MBUF_EXT_PGS_ASSERT_SANITY(m1);
-			m2 = m1;
-			m1 = m1->m_next;
-		}
-	}
-	return (mhead);
-}
-
 static void
 nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
@@ -344,21 +275,34 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	uint16_t flags = 0; /* no command flags supported currently */
 	int16_t cmd = bio_to_nbd_cmd(bp);
 	int error;
+	bool tls = nc->nc_softc->sc_tls;
 
 	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
 
 	G_NBD_LOGREQ(2, bp, "%s", __func__);
-	m = m_gethdr(M_NOWAIT, MT_DATA);
-	if (m == NULL) {
-		nbd_conn_remove_inflight_specific(nc, ni);
-		nbd_inflight_deliver(ni, ENOMEM);
-		return;
+	needed = sizeof(*req);
+	if (tls) {
+		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
+		if (m == NULL) {
+			nbd_conn_remove_inflight_specific(nc, ni);
+			nbd_inflight_deliver(ni, ENOMEM);
+			return;
+		}
+		m->m_epg_last_len = needed;
+		m->m_ext.ext_size = PAGE_SIZE;
+		req = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
+	} else {
+		m = m_get(M_NOWAIT, MT_DATA);
+		if (m == NULL) {
+			nbd_conn_remove_inflight_specific(nc, ni);
+			nbd_inflight_deliver(ni, ENOMEM);
+			return;
+		}
+		req = mtod(m, void *);
 	}
-	m->m_len = sizeof(*req);
-	needed = m->m_len;
-	req = mtod(m, void *);
+	m->m_len = needed;
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->flags = htobe16(flags);
 	req->command = htobe16(cmd);
@@ -413,6 +357,35 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 				m_tail->m_next = d;
 				needed += d->m_len;
 			}
+		} else if (tls) {
+			struct mbuf *m_tail = m;
+			c_caddr_t data = bp->bio_data;
+			size_t resid = bp->bio_length;
+			size_t len;
+
+			G_NBD_LOGREQ(5, bp, "%s mapped write (tls)", __func__);
+			needed += resid;
+			while (resid > 0) {
+				len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
+				d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
+				if (d == NULL) {
+					m_free(m);
+					nbd_conn_remove_inflight_specific(nc,
+					    ni);
+					nbd_inflight_deliver(ni, ENOMEM);
+					return;
+				}
+				d->m_len = len;
+				d->m_ext.ext_size = d->m_epg_npgs * PAGE_SIZE;
+				d->m_epg_last_len =
+				    PAGE_SIZE - (d->m_ext.ext_size - len);
+				MBUF_EXT_PGS_ASSERT_SANITY(d);
+				m_copyback(d, 0, len, data);
+				m_tail->m_next = d;
+				m_tail = d;
+				data += len;
+				resid -= len;
+			}
 		} else {
 			G_NBD_LOGREQ(5, bp, "%s mapped write", __func__);
 			d = m_get(M_NOWAIT, MT_DATA);
@@ -429,21 +402,6 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			d->m_len = bp->bio_length;
 			needed += d->m_len;
 			m->m_next = d;
-		}
-	}
-	m->m_pkthdr.len = needed;
-	if (nc->nc_softc->sc_tls) {
-		/*
-		 * We are only allowed to send unmapped external pages for TLS.
-		 *
-		 * TODO: This could be optimized by creating the appropriate
-		 * mbufs in the first place.
-		 */
-		m = _nbd_copym_into_ext_pgs(m);
-		if (m == NULL) {
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENOMEM);
-			return;
 		}
 	}
 	SOCK_SENDBUF_LOCK(so);
@@ -753,45 +711,45 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	struct socket *so = nc->nc_socket;
 	struct nbd_request *req;
 	struct mbuf *m;
+	size_t needed;
 	int error;
 
 	_Static_assert(sizeof(*req) <= MLEN, "request truncated");
 
 	G_NBD_DEBUG(2, "%s", __func__);
-	m = m_gethdr(M_NOWAIT, MT_DATA);
-	if (m == NULL) {
-		atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
-		return;
-	}
-	m->m_len = sizeof(*req);
-	m->m_pkthdr.len = m->m_len;
-	req = mtod(m, void *);
-	memset(req, 0, sizeof(*req));
-	req->magic = htobe32(NBD_REQUEST_MAGIC);
-	req->command = htobe16(NBD_CMD_DISCONNECT);
+	needed = sizeof(*req);
 	if (nc->nc_softc->sc_tls) {
-		/*
-		 * We are only allowed to send unmapped external pages for TLS.
-		 *
-		 * TODO: This could be optimized by creating the appropriate
-		 * mbufs in the first place.
-		 */
-		m = _nbd_copym_into_ext_pgs(m);
+		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
 		if (m == NULL) {
 			atomic_store_int(&nc->nc_state,
 			    NBD_CONN_HARD_DISCONNECTING);
 			return;
 		}
+		m->m_epg_last_len = needed;
+		m->m_ext.ext_size = PAGE_SIZE;
+		req = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
+	} else {
+		m = m_get(M_NOWAIT, MT_DATA);
+		if (m == NULL) {
+			atomic_store_int(&nc->nc_state,
+			    NBD_CONN_HARD_DISCONNECTING);
+			return;
+		}
+		req = mtod(m, void *);
 	}
+	m->m_len = needed;
+	memset(req, 0, sizeof(*req));
+	req->magic = htobe32(NBD_REQUEST_MAGIC);
+	req->command = htobe16(NBD_CMD_DISCONNECT);
 	SOCK_SENDBUF_LOCK(so);
-	while (sbspace(&so->so_snd) < m->m_len) {
+	while (sbspace(&so->so_snd) < needed) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_DEBUG(2, "%s disconnecting", __func__);
 			m_free(m);
 			return;
 		}
-		so->so_snd.sb_lowat = m->m_len;
+		so->so_snd.sb_lowat = needed;
 		if (sbused(&so->so_snd) == 0)
 			break;
 		sbwait(so, SO_SND);
