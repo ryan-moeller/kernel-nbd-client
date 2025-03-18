@@ -408,12 +408,21 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 				if (nbd_client_recv(client, buf, reply.length)
 				    != 0)
 					return (-1);
-				if (reply.type != NBD_REPLY_ERROR_UNSUPPORTED)
+				switch (reply.type) {
+				case NBD_REPLY_ERROR_UNSUPPORTED:
+				case NBD_REPLY_ERROR_TLS_REQUIRED:
+					break;
+				default:
 					gctl_error(req,
 					    "Negotiation failed: %*s",
 					    reply.length, buf);
+					break;
+				}
 				free(buf);
 			}
+			if (reply.type == NBD_REPLY_ERROR_TLS_REQUIRED)
+				gctl_error(req, "Negotiation failed: "
+				    "TLS required for this export");
 			if (reply.type == NBD_REPLY_ERROR_UNSUPPORTED)
 				return (nbd_client_negotiate_fallback(client));
 			return (-1);
