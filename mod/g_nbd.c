@@ -37,7 +37,6 @@
 
 #include "g_nbd.h"
 #include "nbd-protocol.h"
-#include "sys/types.h"
 
 FEATURE(geom_nbd, "GEOM NBD module");
 
