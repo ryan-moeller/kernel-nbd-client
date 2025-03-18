@@ -523,28 +523,23 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 	return (ni);
 }
 
-static void
-nbd_conn_recv(struct nbd_conn *nc)
+static int
+nbd_conn_recv_mbuf(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 {
-	/* TODO: structured replies if negotiated */
-	struct nbd_simple_reply reply;
 	struct uio uio;
 	struct socket *so = nc->nc_socket;
-	struct mbuf *m;
-	struct nbd_inflight *ni;
-	struct bio *bp;
+	struct mbuf *m, *m_tail;
 	int flags, error;
 
-	G_NBD_DEBUG(2, "%s", __func__);
 	memset(&uio, 0, sizeof(uio));
-	uio.uio_resid = sizeof(reply);
+	uio.uio_resid = len;
 	SOCK_RECVBUF_LOCK(so);
 	while (sbavail(&so->so_rcv) < uio.uio_resid) {
 		if (!nbd_conn_recv_ok(nc, NULL)) {
 			SOCK_RECVBUF_UNLOCK(so);
 			G_NBD_DEBUG(2, "%s disconnecting", __func__);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-			return;
+			return (ENXIO);
 		}
 		so->so_rcv.sb_lowat = uio.uio_resid;
 		sbwait(so, SO_RCV);
@@ -563,15 +558,37 @@ nbd_conn_recv(struct nbd_conn *nc)
 			    error != ERESTART)
 				nbd_conn_degrade_state(nc,
 				    NBD_CONN_HARD_DISCONNECTING);
-			return;
+			return (error);
 		}
 		KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
 		    ("%s soreceive truncated", __func__));
 		if (m == NULL)
-			m = m1;
-		else
-			m_cat(m, m1);
+			m = m_tail = m1;
+		else {
+			while (m_tail->m_next != NULL)
+				m_tail = m_tail->m_next;
+			m_tail->m_next = m1;
+			m_tail = m1;
+		}
 	} while (uio.uio_resid > 0);
+	*mp = m;
+	return (0);
+}
+
+static void
+nbd_conn_recv(struct nbd_conn *nc)
+{
+	/* TODO: structured replies if negotiated */
+	struct nbd_simple_reply reply;
+	struct mbuf *m;
+	struct nbd_inflight *ni;
+	struct bio *bp;
+	int error;
+
+	G_NBD_DEBUG(2, "%s", __func__);
+	error = nbd_conn_recv_mbuf(nc, sizeof(reply), &m);
+	if (error != 0)
+		return;
 	G_NBD_DEBUG(3, "%s received reply", __func__);
 	m_copydata(m, 0, sizeof(reply), (void *)&reply);
 	m_freem(m);
@@ -599,45 +616,11 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	if (bp->bio_cmd == BIO_READ) {
-		memset(&uio, 0, sizeof(uio));
-		uio.uio_resid = bp->bio_length;
-		SOCK_RECVBUF_LOCK(so);
-		while (sbavail(&so->so_rcv) < uio.uio_resid) {
-			if (!nbd_conn_recv_ok(nc, bp)) {
-				SOCK_RECVBUF_UNLOCK(so);
-				G_NBD_LOGREQ(2, bp, "%s disconnecting",
-				    __func__);
-				nbd_conn_degrade_state(nc,
-				    NBD_CONN_HARD_DISCONNECTING);
-				nbd_inflight_deliver(ni, ENXIO);
-				return;
-			}
-			so->so_rcv.sb_lowat = uio.uio_resid;
-			sbwait(so, SO_RCV);
+		error = nbd_conn_recv_mbuf(nc, bp->bio_length, &m);
+		if (error != 0) {
+			nbd_inflight_deliver(ni, error);
+			return;
 		}
-		SOCK_RECVBUF_UNLOCK(so);
-		m = NULL;
-		do {
-			struct mbuf *m1;
-
-			flags = MSG_DONTWAIT;
-			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
-			if (error != 0) {
-				G_NBD_LOGREQ(1, bp, "%s soreceive failed (%d)",
-				    __func__, error);
-				/* TODO: any errors we can survive? */
-				nbd_conn_degrade_state(nc,
-				    NBD_CONN_HARD_DISCONNECTING);
-				nbd_inflight_deliver(ni, error);
-				return;
-			}
-			KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
-			    ("%s soreceive truncated", __func__));
-			if (m == NULL)
-				m = m1;
-			else
-				m_cat(m, m1);
-		} while (uio.uio_resid > 0);
 		G_NBD_LOGREQ(3, bp, "%s received read data", __func__);
 		/* TODO: BIO_VLIST? */
 		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
