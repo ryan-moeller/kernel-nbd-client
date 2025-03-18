@@ -25,6 +25,11 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
+#ifdef WITH_OPENSSL
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+#endif
+
 #include <libgeom.h>
 
 #include "core/geom.h"
@@ -42,23 +47,45 @@ static void nbd_connect(struct gctl_req *req, unsigned flags);
 static void nbd_scale(struct gctl_req *req, unsigned flags);
 static void nbd_info(struct gctl_req *req, unsigned flags);
 
-/* TODO: connect to multiple given names, list, connect to all, tls */
+/* TODO: connect to multiple given names, list, connect to all */
+#ifdef WITH_OPENSSL
+/* TODO: specific CA cert? */
+#define TLS_OPTS \
+		{ 'C', "certfile", G_VAL_OPTIONAL, G_TYPE_STRING }, \
+		{ 'K', "keyfile", G_VAL_OPTIONAL, G_TYPE_STRING }
+#define TLS_USAGE \
+	    "[-C certfile -K keyfile] "
+#endif
 struct g_command class_commands[] = {
 	{ "connect", G_FLAG_LOADKLD, nbd_connect,
 	    {
 		{ 'c', "connections", "1", G_TYPE_NUMBER },
 		{ 'n', "name", "", G_TYPE_STRING },
 		{ 'p', "port", NBD_DEFAULT_PORT, G_TYPE_STRING },
+#ifdef WITH_OPENSSL
+		TLS_OPTS,
+#endif
 		G_OPT_SENTINEL
 	    },
-	    "[-v] [-c num] [-n name] [-p port] host"
+	    "[-c num] [-n name] [-p port] "
+#ifdef WITH_OPENSSL
+	    TLS_USAGE
+#endif
+	    "host"
 	},
 	{ "scale", 0, nbd_scale,
 	    {
 		{ 'c', "connections", NULL, G_TYPE_NUMBER },
+#ifdef WITH_OPENSSL
+		TLS_OPTS,
+#endif
 		G_OPT_SENTINEL
 	    },
-	    "-c num prov"
+	    "-c num "
+#ifdef WITH_OPENSSL
+	    TLS_USAGE
+#endif
+	    "prov"
 	},
 	{ "info", 0, nbd_info,
 	    { G_OPT_SENTINEL },
@@ -86,7 +113,56 @@ struct nbd_client {
 	uint32_t preferred_blocksize;
 	uint32_t maximum_payload;
 	int socket;
+#ifdef WITH_OPENSSL
+	SSL_CTX *ssl_ctx;
+	SSL *ssl;
+#endif
 };
+
+#ifdef WITH_OPENSSL
+static int
+nbd_client_tls_init(struct nbd_client *client)
+{
+	struct gctl_req *req = client->req;
+	const char *certfile = NULL, *keyfile = NULL;
+	SSL_CTX *ctx;
+
+	if (gctl_has_param(req, "certfile"))
+		certfile = gctl_get_ascii(req, "certfile");
+	if (gctl_has_param(req, "keyfile"))
+		keyfile = gctl_get_ascii(req, "keyfile");
+	if (certfile == NULL && keyfile == NULL)
+		return (0);
+	if (certfile == NULL || keyfile == NULL) {
+		gctl_error(req, "Both certfile and keyfile must be given.");
+		return (-1);
+	}
+	client->ssl_ctx = ctx = SSL_CTX_new(TLS_client_method());
+	if (ctx == NULL) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to create TLS client context.");
+		return (-1);
+	}
+	if (SSL_CTX_use_certificate_chain_file(ctx, certfile) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to load certificate chain file.");
+		return (-1);
+	}
+	if (SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to load private key file.");
+		return (-1);
+	}
+	if (SSL_CTX_check_private_key(ctx) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to check private key.");
+		return (-1);
+	}
+	SSL_CTX_set_options(ctx, SSL_OP_ENABLE_KTLS);
+	SSL_CTX_set_min_proto_version(ctx, TLS1_VERSION);
+	return (0);
+}
+#endif
 
 static int
 nbd_client_connect(struct nbd_client *client)
@@ -137,6 +213,37 @@ nbd_client_send(struct nbd_client *client, const void *buf, size_t buflen)
 	ssize_t len;
 	int s = client->socket;
 
+	assert(buf != NULL);
+	assert(buflen != 0);
+	/* TODO: do we actually need to do anything special with ktls? */
+#ifdef WITH_OPENSSL
+	if (client->ssl != NULL) {
+		SSL *ssl = client->ssl;
+		int res;
+
+		while ((res = SSL_write(ssl, buf, buflen)) != buflen) {
+			switch (SSL_get_error(ssl, res)) {
+			case SSL_ERROR_NONE:
+				if (res > 0) {
+					buf += res;
+					buflen -= res;
+					continue;
+				}
+				gctl_error(req, "Connection closed.");
+				return (-1);
+			case SSL_ERROR_SYSCALL:
+				if (errno == EINTR)
+					continue;
+				/* FALLTHROUGH */
+			default:
+				ERR_print_errors_fp(stderr);
+				gctl_error(req, "Connection failed.");
+				return (-1);
+			}
+		}
+		return (0);
+	}
+#endif
 	while ((len = send(s, buf, buflen, MSG_NOSIGNAL)) != buflen) {
 		if (len > 0) {
 			buf += len;
@@ -161,6 +268,37 @@ nbd_client_recv(struct nbd_client *client, void *buf, size_t buflen)
 	ssize_t len;
 	int s = client->socket;
 
+	assert(buf != NULL);
+	assert(buflen != 0);
+	/* TODO: do we actually need to do anything special with ktls? */
+#ifdef WITH_OPENSSL
+	if (client->ssl != NULL) {
+		SSL *ssl = client->ssl;
+		int res;
+
+		while ((res = SSL_read(ssl, buf, buflen)) != buflen) {
+			switch (SSL_get_error(ssl, res)) {
+			case SSL_ERROR_NONE:
+				if (res > 0) {
+					buf += res;
+					buflen -= res;
+					continue;
+				}
+				gctl_error(req, "Connection closed.");
+				return (-1);
+			case SSL_ERROR_SYSCALL:
+				if (errno == EINTR)
+					continue;
+				/* FALLTHROUGH */
+			default:
+				ERR_print_errors_fp(stderr);
+				gctl_error(req, "Connection failed.");
+				return (-1);
+			}
+		}
+		return (0);
+	}
+#endif
 	while ((len = recv(s, buf, buflen, MSG_WAITALL)) != buflen) {
 		if (len > 0) {
 			buf += len;
@@ -321,6 +459,59 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	return (0);
 }
 
+#ifdef WITH_OPENSSL
+static int
+nbd_client_starttls(struct nbd_client *client)
+{
+	struct nbd_option_reply reply;
+	struct gctl_req *req = client->req;
+	SSL *ssl;
+
+	if (nbd_client_send_option(client, NBD_OPTION_STARTTLS, NULL, 0) != 0)
+		return (-1);
+	if (nbd_client_recv_option_reply(client, &reply, NBD_OPTION_STARTTLS)
+	    != 0)
+		return (-1);
+	if (reply.type != NBD_REPLY_ACK) {
+		gctl_error(req, "Failed to negotiate TLS.");
+		return (-1);
+	}
+	client->ssl = ssl = SSL_new(client->ssl_ctx);
+	if (ssl == NULL) {
+		/* TODO: verbose flag */
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to create TLS connection.");
+		return (-1);
+	}
+	if (SSL_set_tlsext_host_name(ssl, client->host) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to set TLS servername extension.");
+		return (-1);
+	}
+	/* TODO: not clear if we need to set a servername callback on client */
+	if (SSL_set_fd(ssl, client->socket) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to set TLS socket file descriptor.");
+		return (-1);
+	}
+	if (SSL_connect(ssl) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "TLS handshake failed.");
+		return (-1);
+	}
+	if (BIO_get_ktls_send(SSL_get_wbio(ssl)) != 1) {
+		gctl_error(req, "Failed to use ktls for send.");
+		return (-1);
+	}
+	if (BIO_get_ktls_recv(SSL_get_rbio(ssl)) != 1) {
+		gctl_error(req, "Failed to use ktls for receive.");
+		return (-1);
+	}
+	/* TODO: verify peer host name matches certificate? */
+	return (0);
+}
+#endif
+
 static int
 nbd_client_negotiate_fallback(struct nbd_client *client)
 {
@@ -354,7 +545,7 @@ nbd_info_block_size_ntoh(struct nbd_info_block_size *bs)
 }
 
 /*
- * TODO: optional TLS, structured replies
+ * TODO: structured replies
  */
 static int
 nbd_client_negotiate_options(struct nbd_client *client, bool first)
@@ -518,11 +709,21 @@ nbd_client_negotiate(struct nbd_client *client, bool first)
 		gctl_error(req, "Handshake failed: invalid magic");
 		return (-1);
 	}
-	if (handshake.style == NBD_OLDSTYLE_MAGIC)
+	if (handshake.style == NBD_OLDSTYLE_MAGIC) {
+#ifdef WITH_OPENSSL
+		if (client->ssl_ctx != NULL) {
+			gctl_error(req, "Server does not support TLS.");
+			return (-1);
+		}
+#endif
 		return (nbd_client_oldstyle_negotiation(client));
-	else if (handshake.style == NBD_NEWSTYLE_MAGIC) {
+	} else if (handshake.style == NBD_NEWSTYLE_MAGIC) {
 		if (nbd_client_newstyle_negotiation(client) != 0)
 			return (-1);
+#ifdef WITH_OPENSSL
+		if (client->ssl_ctx != NULL && nbd_client_starttls(client) != 0)
+			return (-1);
+#endif
 		return (nbd_client_negotiate_options(client, first));
 	}
 	gctl_error(req, "Handshake failed: unknown style");
@@ -530,7 +731,7 @@ nbd_client_negotiate(struct nbd_client *client, bool first)
 }
 
 /*
- * TODO: verbose output, connect all listed by server, ktls
+ * TODO: verbose output, connect all listed by server
  */
 static void
 nbd_connect(struct gctl_req *req, unsigned flags)
@@ -541,6 +742,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	intmax_t nconns;
 	int nargs, nsockets;
 	long tid;
+	bool tls = false;
 
 	nargs = gctl_get_int(req, "nargs");
 	if (nargs != 1) {
@@ -559,6 +761,12 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	client.req = req;
 	client.host = gctl_get_ascii(req, "arg0");
 	client.port = gctl_get_ascii(req, "port");
+#ifdef WITH_OPENSSL
+	if (nbd_client_tls_init(&client) != 0)
+		return;
+	tls = client.ssl_ctx != NULL;
+#endif
+	gctl_ro_param(req, "tls", sizeof(tls), &tls);
 	/*
 	 * Default client properties that may be overridden by negotiation.
 	 */
@@ -581,6 +789,10 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		}
 		if (nbd_client_negotiate(&client, i == 0) != 0)
 			goto close;
+#ifdef WITH_OPENSSL
+		SSL_free(client.ssl);
+		client.ssl = NULL;
+#endif
 	}
 	if ((client.flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
 	    nsockets > 1) {
@@ -609,6 +821,10 @@ close:
 	for (int i = 0; i < nsockets; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
+#ifdef WITH_OPENSSL
+	SSL_free(client.ssl);
+	SSL_CTX_free(client.ssl_ctx);
+#endif
 	free(sockets);
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));
@@ -624,6 +840,7 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	uint32_t flags1;
 	int nargs, nsockets;
 	long tid;
+	bool tls;
 
 	nargs = gctl_get_int(req, "nargs");
 	if (nargs != 1) {
@@ -636,12 +853,12 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Invalid number of connections.");
 		return;
 	}
-	/* TODO: TLS */
 	gctl_change_param(req, "verb", -1, "info");
 	gctl_rw_param(req, "name", sizeof(name), name);
 	gctl_rw_param(req, "host", sizeof(host), host);
 	gctl_rw_param(req, "port", sizeof(port), port);
 	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
+	gctl_rw_param(req, "tls", sizeof(tls), &tls);
 	gctl_rw_param(req, "nsockets", sizeof(nsockets), &nsockets);
 	gctl_issue(req);
 	if (req->nerror != 0)
@@ -656,6 +873,7 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	gctl_delete_param(req, "host");
 	gctl_delete_param(req, "port");
 	gctl_delete_param(req, "flags");
+	gctl_delete_param(req, "tls");
 	gctl_delete_param(req, "nsockets");
 	if ((flags1 & NBD_FLAG_CAN_MULTI_CONN) == 0 && nconns > 1) {
 		gctl_error(req, "Server does not allow multiple connections.");
@@ -674,10 +892,27 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	thr_self(&tid);
 	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
-	client.name = strdup(name);
-	assert(client.name != NULL); /* can't do much if ENOMEM */
 	client.host = host;
 	client.port = port;
+#ifdef WITH_OPENSSL
+	if (nbd_client_tls_init(&client) != 0)
+		return;
+	if (tls && client.ssl_ctx == NULL) {
+		gctl_error(req, "TLS is used on this device.");
+		return;
+	}
+	if (!tls && client.ssl_ctx != NULL) {
+		gctl_error(req, "TLS is not used on this device.");
+		return;
+	}
+#else
+	if (tls) {
+		gctl_error(req, "TLS is used on this device.");
+		return;
+	}
+#endif
+	client.name = strdup(name);
+	assert(client.name != NULL); /* can't do much if ENOMEM */
 	sockets = malloc(sizeof(*sockets) * nsockets);
 	assert(sockets != NULL); /* can't do much if ENOMEM */
 	for (int i = 0; i < nsockets; i++) {
@@ -689,6 +924,10 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		sockets[i] = client.socket;
 		if (nbd_client_negotiate(&client, false) != 0)
 			goto close;
+#ifdef WITH_OPENSSL
+		SSL_free(client.ssl);
+		client.ssl = NULL;
+#endif
 	}
 	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
 	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
@@ -697,6 +936,10 @@ close:
 	for (int i = 0; i < nsockets; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
+#ifdef WITH_OPENSSL
+	SSL_free(client.ssl);
+	SSL_CTX_free(client.ssl_ctx);
+#endif
 	free(sockets);
 	/* Didn't ask for these, but in case we got them anyway... */
 	free(__DECONST(char *, client.name));
@@ -717,6 +960,7 @@ nbd_info(struct gctl_req *req, unsigned flags)
 	uint32_t maxpayload;
 	u_int nsockets;
 	int nargs;
+	bool tls;
 
 	nargs = gctl_get_int(req, "nargs");
 	if (nargs != 1) {
@@ -729,6 +973,7 @@ nbd_info(struct gctl_req *req, unsigned flags)
 	gctl_rw_param(req, "description", sizeof(description), description);
 	gctl_rw_param(req, "size", sizeof(size), &size);
 	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
+	gctl_rw_param(req, "tls", sizeof(tls), &tls);
 	gctl_rw_param(req, "minblocksize", sizeof(minblocksize), &minblocksize);
 	gctl_rw_param(req, "prefblocksize", sizeof(prefblocksize),
 	    &prefblocksize);
@@ -746,6 +991,7 @@ nbd_info(struct gctl_req *req, unsigned flags)
 	printf("Size: %zd\n", size);
 	/* TODO: decode flags */
 	printf("Flags: 0x%08x\n", flags1);
+	printf("TLS: %s\n", tls ? "yes" : "no");
 	printf("Minimum block size: %u\n", minblocksize);
 	printf("Preferred block size: %u\n", prefblocksize);
 	printf("Maximum payload: %u\n", maxpayload);

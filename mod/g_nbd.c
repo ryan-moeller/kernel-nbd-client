@@ -37,6 +37,7 @@
 
 #include "g_nbd.h"
 #include "nbd-protocol.h"
+#include "sys/types.h"
 
 FEATURE(geom_nbd, "GEOM NBD module");
 
@@ -99,6 +100,7 @@ struct g_nbd_softc {
 	uint32_t	sc_prefblocksize;
 	uint32_t	sc_maxpayload;
 	u_int		sc_unit;
+	bool		sc_tls;
 	struct g_provider	*sc_provider;
 	struct bio_queue	sc_queue;
 	struct mtx	sc_queue_mtx;
@@ -114,6 +116,7 @@ static u_int g_nbd_nconns;
 static struct sx g_nbd_lock;
 static struct unrhdr *g_nbd_unit;
 static uma_zone_t g_nbd_inflight_zone;
+static u_int g_nbd_tlsmax;
 
 static inline int16_t
 bio_to_nbd_cmd(struct bio *bp)
@@ -262,6 +265,75 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 	return (true);
 }
 
+/*
+ * Inspired by _rpc_copym_into_ext_pgs().
+ */
+static struct mbuf *
+_nbd_copym_into_ext_pgs(struct mbuf *mp)
+{
+	struct mbuf *m, *m1, *m2, *mhead;
+	int tlen;
+
+	KASSERT((mp->m_flags & (M_EXT | M_EXTPG)) != (M_EXT | M_EXTPG),
+	    ("%s: first mbuf is an ext_pgs", __func__));
+	/*
+	 * Find the last non-ext_pgs mbuf and the total length of the
+	 * non-ext_pgs mbuf(s).  The first mbuf must always be a
+	 * non-ext_pgs mbuf.
+	 */
+	tlen = mp->m_len;
+	m1 = mp;
+	for (m = mp->m_next; m != NULL; m = m->m_next) {
+		if ((m->m_flags & M_EXTPG) != 0)
+			break;
+		tlen += m->m_len;
+		m1 = m;
+	}
+
+	/*
+	 * Copy the non-ext_pgs mbuf(s) into an ext_pgs mbuf list.
+	 */
+	m1->m_next = NULL;
+	mhead = mb_mapped_to_unmapped(mp, tlen, g_nbd_tlsmax, M_NOWAIT, &m1);
+
+	/*
+	 * Link the ext_pgs list onto the newly copied list and free up the
+	 * non-ext_pgs mbuf(s).
+	 */
+	m1->m_next = m;
+	m_freem(mp);
+
+	/*
+	 * Sanity check the resultant mbuf list.  Check for and remove any 0
+	 * length mbufs, since the KERN_TLS code expects no 0 length mbufs in
+	 * the list.
+	 */
+	m2 = NULL;
+	m1 = mhead;
+	while (m1 != NULL) {
+		KASSERT(m1->m_len >= 0, ("%s: negative m_len", __func__));
+		KASSERT((m1->m_flags & (M_EXT | M_EXTPG)) == (M_EXT | M_EXTPG),
+		    ("%s: non-unmapped mbuf in list", __func__));
+		if (m1->m_len == 0) {
+			if (m2 != NULL)
+				m2->m_next = m1->m_next;
+			else
+				m = m1->m_next;
+			m1->m_next = NULL;
+			m_free(m1);
+			if (m2 != NULL)
+				m1 = m2->m_next;
+			else
+				m1 = m;
+		} else {
+			MBUF_EXT_PGS_ASSERT_SANITY(m1);
+			m2 = m1;
+			m1 = m1->m_next;
+		}
+	}
+	return (mhead);
+}
+
 static void
 nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
@@ -361,6 +433,20 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 		}
 	}
 	m->m_pkthdr.len = needed;
+	if (nc->nc_softc->sc_tls) {
+		/*
+		 * We are only allowed to send unmapped external pages for TLS.
+		 *
+		 * TODO: This could be optimized by creating the appropriate
+		 * mbufs in the first place.
+		 */
+		m = _nbd_copym_into_ext_pgs(m);
+		if (m == NULL) {
+			nbd_conn_remove_inflight_specific(nc, ni);
+			nbd_inflight_deliver(ni, ENOMEM);
+			return;
+		}
+	}
 	SOCK_SENDBUF_LOCK(so);
 	while (sbspace(&so->so_snd) < needed) {
 		if (!nbd_conn_send_ok(nc, bp)) {
@@ -661,6 +747,20 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	memset(req, 0, sizeof(*req));
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
+	if (nc->nc_softc->sc_tls) {
+		/*
+		 * We are only allowed to send unmapped external pages for TLS.
+		 *
+		 * TODO: This could be optimized by creating the appropriate
+		 * mbufs in the first place.
+		 */
+		m = _nbd_copym_into_ext_pgs(m);
+		if (m == NULL) {
+			atomic_store_int(&nc->nc_state,
+			    NBD_CONN_HARD_DISCONNECTING);
+			return;
+		}
+	}
 	SOCK_SENDBUF_LOCK(so);
 	while (sbspace(&so->so_snd) < m->m_len) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
@@ -1053,6 +1153,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	const char *host, *port, *name, *description;
 	uint64_t *sizep;
 	uint32_t *flagsp, *minbsp, *prefbsp, *maxpayloadp;
+	bool *tlsp;
 	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
@@ -1092,6 +1193,20 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "No 'flags' argument.");
+		return;
+	}
+	tlsp = gctl_get_paraml(req, "tls", sizeof(*tlsp));
+	if (tlsp == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'tls' argument.");
+		return;
+	}
+	if (*tlsp && g_nbd_tlsmax == 0) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "kern.ipc.tls.maxlen was not available when "
+		   "module loaded");
 		return;
 	}
 	minbsp = gctl_get_paraml(req, "minimum_blocksize", sizeof(*minbsp));
@@ -1172,6 +1287,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_prefblocksize = *prefbsp;
 	sc->sc_maxpayload = maxsz;
 	sc->sc_unit = unit;
+	sc->sc_tls = *tlsp;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
 	SLIST_INIT(&sc->sc_connections);
@@ -1332,6 +1448,8 @@ g_nbd_ctl_info(struct gctl_req *req, struct g_class *mp)
 		return;
 	if (set_info(req, "flags", &sc->sc_flags, sizeof(sc->sc_flags)) != 0)
 		return;
+	if (set_info(req, "tls", &sc->sc_tls, sizeof(sc->sc_tls)) != 0)
+		return;
 	if (set_info(req, "minblocksize", &sc->sc_minblocksize,
 	    sizeof(sc->sc_minblocksize)) != 0)
 		return;
@@ -1432,12 +1550,18 @@ g_nbd_ctl_destroy(struct gctl_req *req __unused, struct g_class *mp __unused,
 static void
 g_nbd_init(struct g_class *mp __unused)
 {
+	size_t sz;
+
 	G_NBD_DEBUG(2, "%s", __func__);
 	sx_init(&g_nbd_lock, "GEOM NBD connections");
 	g_nbd_unit = new_unrhdr(0, INT_MAX, NULL);
 	g_nbd_inflight_zone = uma_zcreate("nbd_inflight",
 	    sizeof(struct nbd_inflight), NULL, NULL, NULL, NULL,
 	    UMA_ALIGN_PTR, 0);
+	sz = sizeof(g_nbd_tlsmax);
+	if (kernel_sysctlbyname(curthread, "kern.ipc.tls.maxlen",
+	    &g_nbd_tlsmax, &sz, NULL, 0, NULL, 0) != 0)
+		g_nbd_tlsmax = 0;
 }
 
 static void
