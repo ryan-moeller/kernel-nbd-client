@@ -94,7 +94,13 @@ struct g_nbd_softc {
 	const char	*sc_name;
 	const char	*sc_description;
 	uint64_t	sc_size;
-	uint32_t	sc_flags;
+	union {
+		uint32_t	sc_flags;
+		struct {
+			uint16_t	sc_handshake_flags;
+			uint16_t	sc_transmission_flags;
+		};
+	};
 	uint32_t	sc_minblocksize;
 	uint32_t	sc_prefblocksize;
 	uint32_t	sc_maxpayload;
@@ -1111,7 +1117,14 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct g_nbd_softc *sc;
 	const char *host, *port, *name, *description;
 	uint64_t *sizep;
-	uint32_t *flagsp, *minbsp, *prefbsp, *maxpayloadp;
+	union {
+		uint32_t flags;
+		struct {
+			uint16_t handshake_flags;
+			uint16_t transmission_flags;
+		};
+	} *flagsp;
+	uint32_t *minbsp, *prefbsp, *maxpayloadp;
 	bool *tlsp;
 	struct socket **sockets;
 	struct g_geom *gp;
@@ -1215,7 +1228,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		free_unr(g_nbd_unit, unit);
 		return;
 	}
-	if ((*flagsp & NBD_FLAG_CAN_MULTI_CONN) == 0 && nsockets > 1) {
+	if ((flagsp->transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
+	    nsockets > 1) {
 		for (int i = 0; i < nsockets; i++)
 			soclose(sockets[i]);
 		g_free(sockets);
@@ -1241,7 +1255,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	if (description != NULL)
 		sc->sc_description = strdup(description, M_GEOM);
 	sc->sc_size = *sizep;
-	sc->sc_flags = *flagsp;
+	sc->sc_flags = flagsp->flags;
 	sc->sc_minblocksize = *minbsp;
 	sc->sc_prefblocksize = *prefbsp;
 	sc->sc_maxpayload = maxsz;
@@ -1318,6 +1332,11 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	sc = gp->softc;
+	if ((sc->sc_transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
+	    nconns > 1) {
+		gctl_error(req, "Server doesn't support multiple connections.");
+		return;
+	}
 	mtx_lock(&sc->sc_conns_mtx);
 	if (sc->sc_nconns == nconns) {
 		mtx_unlock(&sc->sc_conns_mtx);
@@ -1615,7 +1634,7 @@ g_nbd_start(struct bio *bp)
 	case BIO_DELETE:
 	case BIO_FLUSH:
 	case BIO_WRITE:
-		if ((sc->sc_flags & NBD_FLAG_READ_ONLY) != 0) {
+		if ((sc->sc_transmission_flags & NBD_FLAG_READ_ONLY) != 0) {
 			G_NBD_LOGREQ(1, bp, "%s device is read only", __func__);
 			g_io_deliver(bp, EPERM);
 			return;
@@ -1623,14 +1642,14 @@ g_nbd_start(struct bio *bp)
 	}
 	switch (bp->bio_cmd) {
 	case BIO_DELETE:
-		if ((sc->sc_flags & NBD_FLAG_SEND_TRIM) == 0) {
+		if ((sc->sc_transmission_flags & NBD_FLAG_SEND_TRIM) == 0) {
 			G_NBD_LOGREQ(1, bp, "%s TRIM unsupported", __func__);
 			g_io_deliver(bp, EOPNOTSUPP);
 			return;
 		}
 		break;
 	case BIO_FLUSH:
-		if ((sc->sc_flags & NBD_FLAG_SEND_FLUSH) == 0) {
+		if ((sc->sc_transmission_flags & NBD_FLAG_SEND_FLUSH) == 0) {
 			G_NBD_LOGREQ(1, bp, "%s FLUSH unsupported", __func__);
 			g_io_deliver(bp, EOPNOTSUPP);
 			return;
@@ -1665,10 +1684,10 @@ g_nbd_start(struct bio *bp)
 		return;
 	case BIO_GETATTR:
 		if (g_handleattr_int(bp, "GEOM::candelete",
-		    (sc->sc_flags & NBD_FLAG_SEND_TRIM) != 0))
+		    (sc->sc_transmission_flags & NBD_FLAG_SEND_TRIM) != 0))
 			return;
 		if (g_handleattr_uint16_t(bp, "GEOM::rotation_rate",
-		    (sc->sc_flags & NBD_FLAG_ROTATIONAL) != 0 ?
+		    (sc->sc_transmission_flags & NBD_FLAG_ROTATIONAL) != 0 ?
 		    DISK_RR_UNKNOWN : DISK_RR_NON_ROTATING))
 			return;
 		if (strcmp(bp->bio_attribute, "GEOM::ident") == 0) {

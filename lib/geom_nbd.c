@@ -108,7 +108,13 @@ struct nbd_client {
 	const char *name;
 	const char *description;
 	uint64_t size;
-	uint32_t flags;
+	union {
+		uint32_t flags;
+		struct {
+			uint16_t handshake_flags;
+			uint16_t transmission_flags;
+		};
+	};
 	uint32_t minimum_blocksize;
 	uint32_t preferred_blocksize;
 	uint32_t maximum_payload;
@@ -344,7 +350,12 @@ nbd_client_oldstyle_negotiation(struct nbd_client *client)
 		return (-1);
 	}
 	client->size = handshake.size;
-	client->flags = handshake.flags;
+#define IGNORED_BITS 0xffff0000
+	if ((handshake.flags & IGNORED_BITS) != 0)
+		fprintf(stderr, "Ignoring flags in upper nibble: 0x%08x\n",
+		    handshake.flags & IGNORED_BITS);
+#undef IGNORED_BITS
+	client->handshake_flags = handshake.flags;
 	return (0);
 }
 
@@ -376,7 +387,7 @@ nbd_client_newstyle_negotiation(struct nbd_client *client)
 		gctl_error(client->req, "Invalid handshake.");
 		return (-1);
 	}
-	client->flags = handshake.handshake_flags << 16;
+	client->handshake_flags = handshake.handshake_flags;
 	client_flags = NBD_CLIENT_FLAG_FIXED_NEWSTYLE;
 	if ((handshake.handshake_flags & NBD_FLAG_NO_ZEROES) != 0)
 		client_flags |= NBD_CLIENT_FLAG_NO_ZEROES;
@@ -419,7 +430,7 @@ nbd_client_recv_export_info(struct nbd_client *client,
 	if (nbd_client_recv(client, info, SHORT_INFO_LEN) != 0)
 		return (-1);
 	nbd_export_info_ntoh(info);
-	if (((info->transmission_flags >> 16) & NBD_FLAG_NO_ZEROES) != 0)
+	if ((info->transmission_flags & NBD_FLAG_NO_ZEROES) != 0)
 		return (0);
 	return (nbd_client_recv(client, info->reserved,
 	    sizeof(info->reserved)));
@@ -523,7 +534,7 @@ nbd_client_negotiate_fallback(struct nbd_client *client)
 	if (nbd_client_recv_export_info(client, &info) != 0)
 		return (-1);
 	client->size = info.size;
-	client->flags |= info.transmission_flags;
+	client->transmission_flags = info.transmission_flags;
 	return (0);
 }
 
@@ -637,7 +648,7 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 
 			nbd_info_export_ntoh(export);
 			client->size = export->size;
-			client->flags |= export->transmission_flags;
+			client->transmission_flags = export->transmission_flags;
 			saw_export = true;
 			break;
 		}
@@ -794,7 +805,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		client.ssl = NULL;
 #endif
 	}
-	if ((client.flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
+	if ((client.transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
 	    nsockets > 1) {
 		gctl_error(req, "Server does not allow multiple connections.");
 		goto close;
@@ -837,7 +848,13 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	struct nbd_client client = {};
 	int *sockets = NULL;
 	intmax_t nconns;
-	uint32_t flags1;
+	union {
+		uint32_t flags;
+		struct {
+			uint16_t handshake_flags;
+			uint16_t transmission_flags;
+		};
+	} flags1;
 	int nargs, nsockets;
 	long tid;
 	bool tls;
@@ -875,7 +892,8 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	gctl_delete_param(req, "flags");
 	gctl_delete_param(req, "tls");
 	gctl_delete_param(req, "nsockets");
-	if ((flags1 & NBD_FLAG_CAN_MULTI_CONN) == 0 && nconns > 1) {
+	if ((flags1.transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
+	    nconns > 1) {
 		gctl_error(req, "Server does not allow multiple connections.");
 		return;
 	}
@@ -954,7 +972,13 @@ nbd_info(struct gctl_req *req, unsigned flags)
 	char host[PATH_MAX];
 	char port[32];
 	uint64_t size;
-	uint32_t flags1;
+	union {
+		uint32_t flags;
+		struct {
+			uint16_t handshake_flags;
+			uint16_t transmission_flags;
+		};
+	} flags1;
 	uint32_t minblocksize;
 	uint32_t prefblocksize;
 	uint32_t maxpayload;
@@ -989,8 +1013,67 @@ nbd_info(struct gctl_req *req, unsigned flags)
 	printf("Host: %s\n", host);
 	printf("Port: %s\n", port);
 	printf("Size: %zd\n", size);
-	/* TODO: decode flags */
-	printf("Flags: 0x%08x\n", flags1);
+#define NBD_FLAG(id) { NBD_FLAG_ ## id, #id }
+	printf("Handshake flags: 0x%04x", flags1.handshake_flags);
+	if (flags1.handshake_flags != 0) {
+		const struct { uint16_t flag; const char *name; } names[] = {
+			NBD_FLAG(FIXED_NEWSTYLE),
+			NBD_FLAG(NO_ZEROES),
+		};
+		uint32_t unknown, check = 0;
+		int i;
+
+		printf("<");
+		for (i = 0; i < nitems(names); i++) {
+			uint16_t flag = names[i].flag;
+
+			if ((flags1.handshake_flags & flag) != 0) {
+				printf("%s%s", check != 0 ? "," : "", names[i].name);
+				check |= flag;
+			}
+		}
+		unknown = flags1.handshake_flags & ~check;
+		if (unknown != 0)
+			printf("%s0x%x", check != 0 ? "," : "", unknown);
+		printf(">");
+	}
+	printf("\n");
+	printf("Transmission flags: 0x%04x", flags1.transmission_flags);
+	if (flags1.transmission_flags != 0) {
+		const struct { uint16_t flag; const char *name; } names[] = {
+			NBD_FLAG(HAS_FLAGS),
+			NBD_FLAG(READ_ONLY),
+			NBD_FLAG(SEND_FLUSH),
+			NBD_FLAG(SEND_FUA),
+			NBD_FLAG(ROTATIONAL),
+			NBD_FLAG(SEND_TRIM),
+			NBD_FLAG(SEND_WRITE_ZEROES),
+			NBD_FLAG(SEND_DF),
+			NBD_FLAG(CAN_MULTI_CONN),
+			NBD_FLAG(SEND_RESIZE),
+			NBD_FLAG(SEND_CACHE),
+			NBD_FLAG(SEND_FAST_ZERO),
+			NBD_FLAG(BLOCK_STATUS_PAYLOAD),
+		};
+		uint32_t unknown, check = 0;
+		int i;
+
+		printf("<");
+		for (i = 0; i < nitems(names); i++) {
+			uint16_t flag = names[i].flag;
+
+			if ((flags1.transmission_flags & flag) != 0) {
+				printf("%s%s", check != 0 ? "," : "", names[i].name);
+				check |= flag;
+			}
+		}
+		unknown = flags1.transmission_flags & ~check;
+		if (unknown != 0)
+			printf("%s0x%x", check != 0 ? "," : "", unknown);
+		printf(">");
+	}
+	printf("\n");
+#undef NBD_FLAG
 	printf("TLS: %s\n", tls ? "yes" : "no");
 	printf("Minimum block size: %u\n", minblocksize);
 	printf("Preferred block size: %u\n", prefblocksize);
