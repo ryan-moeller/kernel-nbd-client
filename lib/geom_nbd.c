@@ -121,7 +121,6 @@ struct nbd_client {
 	int socket;
 #ifdef WITH_OPENSSL
 	SSL_CTX *ssl_ctx;
-	SSL *ssl;
 #endif
 };
 
@@ -429,7 +428,7 @@ nbd_client_starttls(struct nbd_client *client)
 		gctl_error(req, "Failed to negotiate TLS.");
 		return (-1);
 	}
-	client->ssl = ssl = SSL_new(client->ssl_ctx);
+	ssl = SSL_new(client->ssl_ctx);
 	if (ssl == NULL) {
 		/* TODO: verbose flag */
 		ERR_print_errors_fp(stderr);
@@ -438,29 +437,35 @@ nbd_client_starttls(struct nbd_client *client)
 	}
 	if (SSL_set_tlsext_host_name(ssl, client->host) != 1) {
 		ERR_print_errors_fp(stderr);
+		SSL_free(ssl);
 		gctl_error(req, "Failed to set TLS servername extension.");
 		return (-1);
 	}
 	/* TODO: not clear if we need to set a servername callback on client */
 	if (SSL_set_fd(ssl, client->socket) != 1) {
 		ERR_print_errors_fp(stderr);
+		SSL_free(ssl);
 		gctl_error(req, "Failed to set TLS socket file descriptor.");
 		return (-1);
 	}
 	if (SSL_connect(ssl) != 1) {
 		ERR_print_errors_fp(stderr);
+		SSL_free(ssl);
 		gctl_error(req, "TLS handshake failed.");
 		return (-1);
 	}
 	if (BIO_get_ktls_send(SSL_get_wbio(ssl)) != 1) {
+		SSL_free(ssl);
 		gctl_error(req, "Failed to use ktls for send.");
 		return (-1);
 	}
 	if (BIO_get_ktls_recv(SSL_get_rbio(ssl)) != 1) {
+		SSL_free(ssl);
 		gctl_error(req, "Failed to use ktls for receive.");
 		return (-1);
 	}
 	/* TODO: verify peer host name matches certificate? */
+	SSL_free(ssl);
 	return (0);
 }
 #endif
@@ -742,10 +747,6 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		}
 		if (nbd_client_negotiate(&client, i == 0) != 0)
 			goto close;
-#ifdef WITH_OPENSSL
-		SSL_free(client.ssl);
-		client.ssl = NULL;
-#endif
 	}
 	if ((client.transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
 	    nsockets > 1) {
@@ -775,7 +776,6 @@ close:
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
 #ifdef WITH_OPENSSL
-	SSL_free(client.ssl);
 	SSL_CTX_free(client.ssl_ctx);
 #endif
 	free(sockets);
@@ -884,10 +884,6 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		sockets[i] = client.socket;
 		if (nbd_client_negotiate(&client, false) != 0)
 			goto close;
-#ifdef WITH_OPENSSL
-		SSL_free(client.ssl);
-		client.ssl = NULL;
-#endif
 	}
 	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
 	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
@@ -897,7 +893,6 @@ close:
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
 #ifdef WITH_OPENSSL
-	SSL_free(client.ssl);
 	SSL_CTX_free(client.ssl_ctx);
 #endif
 	free(sockets);
