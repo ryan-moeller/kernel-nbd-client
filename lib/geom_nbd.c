@@ -221,35 +221,6 @@ nbd_client_send(struct nbd_client *client, const void *buf, size_t buflen)
 
 	assert(buf != NULL);
 	assert(buflen != 0);
-	/* TODO: do we actually need to do anything special with ktls? */
-#ifdef WITH_OPENSSL
-	if (client->ssl != NULL) {
-		SSL *ssl = client->ssl;
-		int res;
-
-		while ((res = SSL_write(ssl, buf, buflen)) != buflen) {
-			switch (SSL_get_error(ssl, res)) {
-			case SSL_ERROR_NONE:
-				if (res > 0) {
-					buf += res;
-					buflen -= res;
-					continue;
-				}
-				gctl_error(req, "Connection closed.");
-				return (-1);
-			case SSL_ERROR_SYSCALL:
-				if (errno == EINTR)
-					continue;
-				/* FALLTHROUGH */
-			default:
-				ERR_print_errors_fp(stderr);
-				gctl_error(req, "Connection failed.");
-				return (-1);
-			}
-		}
-		return (0);
-	}
-#endif
 	while ((len = send(s, buf, buflen, MSG_NOSIGNAL)) != buflen) {
 		if (len > 0) {
 			buf += len;
@@ -276,35 +247,6 @@ nbd_client_recv(struct nbd_client *client, void *buf, size_t buflen)
 
 	assert(buf != NULL);
 	assert(buflen != 0);
-	/* TODO: do we actually need to do anything special with ktls? */
-#ifdef WITH_OPENSSL
-	if (client->ssl != NULL) {
-		SSL *ssl = client->ssl;
-		int res;
-
-		while ((res = SSL_read(ssl, buf, buflen)) != buflen) {
-			switch (SSL_get_error(ssl, res)) {
-			case SSL_ERROR_NONE:
-				if (res > 0) {
-					buf += res;
-					buflen -= res;
-					continue;
-				}
-				gctl_error(req, "Connection closed.");
-				return (-1);
-			case SSL_ERROR_SYSCALL:
-				if (errno == EINTR)
-					continue;
-				/* FALLTHROUGH */
-			default:
-				ERR_print_errors_fp(stderr);
-				gctl_error(req, "Connection failed.");
-				return (-1);
-			}
-		}
-		return (0);
-	}
-#endif
 	while ((len = recv(s, buf, buflen, MSG_WAITALL)) != buflen) {
 		if (len > 0) {
 			buf += len;
