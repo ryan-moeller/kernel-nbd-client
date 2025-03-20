@@ -28,6 +28,7 @@
 #ifdef WITH_OPENSSL
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include "openssl_hostname_validation.h"
 #endif
 
 #include <libgeom.h>
@@ -125,6 +126,23 @@ struct nbd_client {
 };
 
 #ifdef WITH_OPENSSL
+/* See http://archives.seul.org/libevent/users/Jan-2013/msg00039.html */
+static int
+cert_verify_callback(X509_STORE_CTX *x509_ctx, void *arg)
+{
+	struct nbd_client *client = arg;
+	X509 *server_cert;
+
+	if (X509_verify_cert(x509_ctx) != 1)
+		return (0);
+	server_cert = X509_STORE_CTX_get_current_cert(x509_ctx);
+	if (validate_hostname(client->host, server_cert) != MatchFound) {
+		gctl_error(client->req, "Failed to verify server hostname.");
+		return (0);
+	}
+	return (1);
+}
+
 static int
 nbd_client_tls_init(struct nbd_client *client)
 {
@@ -175,6 +193,7 @@ nbd_client_tls_init(struct nbd_client *client)
 		return (-1);
 	}
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+	SSL_CTX_set_cert_verify_callback(ctx, cert_verify_callback, client);
 	SSL_CTX_set_options(ctx, SSL_OP_ENABLE_KTLS);
 	SSL_CTX_set_min_proto_version(ctx, TLS1_VERSION);
 	return (0);
@@ -453,7 +472,6 @@ nbd_client_starttls(struct nbd_client *client)
 		gctl_error(req, "Failed to set TLS servername extension.");
 		return (-1);
 	}
-	/* TODO: not clear if we need to set a servername callback on client */
 	if (SSL_set_fd(ssl, client->socket) != 1) {
 		ERR_print_errors_fp(stderr);
 		SSL_free(ssl);
@@ -476,7 +494,6 @@ nbd_client_starttls(struct nbd_client *client)
 		gctl_error(req, "Failed to use ktls for receive.");
 		return (-1);
 	}
-	/* TODO: verify peer host name matches certificate? */
 	SSL_free(ssl);
 	return (0);
 }
