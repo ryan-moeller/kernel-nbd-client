@@ -49,12 +49,12 @@ static void nbd_info(struct gctl_req *req, unsigned flags);
 
 /* TODO: connect to multiple given names, list, connect to all */
 #ifdef WITH_OPENSSL
-/* TODO: specific CA cert? */
 #define TLS_OPTS \
-		{ 'C', "certfile", G_VAL_OPTIONAL, G_TYPE_STRING }, \
-		{ 'K', "keyfile", G_VAL_OPTIONAL, G_TYPE_STRING }
+		{ 'A', "cacert", G_VAL_OPTIONAL, G_TYPE_STRING }, \
+		{ 'C', "cert", G_VAL_OPTIONAL, G_TYPE_STRING }, \
+		{ 'K', "key", G_VAL_OPTIONAL, G_TYPE_STRING }
 #define TLS_USAGE \
-	    "[-C certfile -K keyfile] "
+	    "[[-A cacert] -C cert -K key] "
 #endif
 struct g_command class_commands[] = {
 	{ "connect", G_FLAG_LOADKLD, nbd_connect,
@@ -129,17 +129,23 @@ static int
 nbd_client_tls_init(struct nbd_client *client)
 {
 	struct gctl_req *req = client->req;
-	const char *certfile = NULL, *keyfile = NULL;
+	const char *cacert = NULL, *cert = NULL, *key = NULL;
 	SSL_CTX *ctx;
 
-	if (gctl_has_param(req, "certfile"))
-		certfile = gctl_get_ascii(req, "certfile");
-	if (gctl_has_param(req, "keyfile"))
-		keyfile = gctl_get_ascii(req, "keyfile");
-	if (certfile == NULL && keyfile == NULL)
-		return (0);
-	if (certfile == NULL || keyfile == NULL) {
-		gctl_error(req, "Both certfile and keyfile must be given.");
+	if (gctl_has_param(req, "cacert"))
+		cacert = gctl_get_ascii(req, "cacert");
+	if (gctl_has_param(req, "cert"))
+		cert = gctl_get_ascii(req, "cert");
+	if (gctl_has_param(req, "key"))
+		key = gctl_get_ascii(req, "key");
+	if (cert == NULL && key == NULL) {
+		if (cacert == NULL)
+			return (0);
+		gctl_error(req, "Need cert and key with cacert.");
+		return (-1);
+	}
+	if (cert == NULL || key == NULL) {
+		gctl_error(req, "Both cert and key must be given.");
 		return (-1);
 	}
 	client->ssl_ctx = ctx = SSL_CTX_new(TLS_client_method());
@@ -148,12 +154,17 @@ nbd_client_tls_init(struct nbd_client *client)
 		gctl_error(req, "Failed to create TLS client context.");
 		return (-1);
 	}
-	if (SSL_CTX_use_certificate_chain_file(ctx, certfile) != 1) {
+	if (cacert != NULL && SSL_CTX_load_verify_file(ctx, cacert) != 1) {
+		ERR_print_errors_fp(stderr);
+		gctl_error(req, "Failed to load CA certificate file.");
+		return (-1);
+	}
+	if (SSL_CTX_use_certificate_chain_file(ctx, cert) != 1) {
 		ERR_print_errors_fp(stderr);
 		gctl_error(req, "Failed to load certificate chain file.");
 		return (-1);
 	}
-	if (SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM) != 1) {
+	if (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1) {
 		ERR_print_errors_fp(stderr);
 		gctl_error(req, "Failed to load private key file.");
 		return (-1);
@@ -163,6 +174,7 @@ nbd_client_tls_init(struct nbd_client *client)
 		gctl_error(req, "Failed to check private key.");
 		return (-1);
 	}
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 	SSL_CTX_set_options(ctx, SSL_OP_ENABLE_KTLS);
 	SSL_CTX_set_min_proto_version(ctx, TLS1_VERSION);
 	return (0);
