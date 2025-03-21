@@ -14,6 +14,7 @@
 #include <err.h>
 #include <errno.h>
 #include <netdb.h>
+#include <paths.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,7 +48,6 @@ uint32_t version = G_NBD_VERSION;
 
 static void nbd_connect(struct gctl_req *req, unsigned flags);
 static void nbd_scale(struct gctl_req *req, unsigned flags);
-static void nbd_info(struct gctl_req *req, unsigned flags);
 
 /* TODO: connect to multiple given names, list, connect to all */
 #ifdef WITH_OPENSSL
@@ -87,10 +87,6 @@ struct g_command class_commands[] = {
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
-	    "prov"
-	},
-	{ "info", 0, nbd_info,
-	    { G_OPT_SENTINEL },
 	    "prov"
 	},
 	{ "disconnect", 0, NULL,
@@ -818,21 +814,73 @@ free:
 	free(__DECONST(char *, client.description));
 }
 
+static struct gclass *
+find_class(struct gmesh *mesh, const char *name)
+{
+	struct gclass *mp;
+
+	LIST_FOREACH(mp, &mesh->lg_class, lg_class)
+		if (strcmp(mp->lg_name, name) == 0)
+			return (mp);
+	return (NULL);
+}
+
+static bool
+geom_is_withered(struct ggeom *gp)
+{
+	struct gconfig *gc;
+
+	LIST_FOREACH(gc, &gp->lg_config, lg_config)
+		if (strcmp(gc->lg_name, "wither") == 0)
+			return (true);
+	return (false);
+}
+
+static struct ggeom *
+find_geom(struct gclass *mp, const char *name)
+{
+	struct ggeom *gp, *wgp = NULL;
+
+	if (strncmp(name, _PATH_DEV, sizeof(_PATH_DEV) - 1) == 0)
+		name += sizeof(_PATH_DEV) - 1;
+	LIST_FOREACH(gp, &mp->lg_geom, lg_geom) {
+		if (strcmp(gp->lg_name, name) != 0)
+			continue;
+		if (!geom_is_withered(gp))
+			return (gp);
+		wgp = gp;
+	}
+	return (wgp);
+}
+
+static const char *
+find_config(struct ggeom *gp, const char *name)
+{
+	struct gconfig *gc;
+
+	LIST_FOREACH(gc, &gp->lg_config, lg_config) {
+		if (strcmp(gc->lg_name, name) == 0) {
+			if (gc->lg_val == NULL)
+				/* libgeom replaced "" with NULL */
+				return ("");
+			return (gc->lg_val);
+		}
+	}
+	return (NULL);
+}
+
 static void
 nbd_scale(struct gctl_req *req, unsigned flags)
 {
-	char name[PATH_MAX], host[PATH_MAX], port[32];
 	struct nbd_client client = {};
 	struct rlimit nofile;
+	struct gmesh mesh;
+	struct gclass *mp;
+	struct ggeom *gp;
+	const char *classname, *geomname, *name;
+	const char *tflags, *connections, *cfgtls;
 	int *sockets = NULL;
 	intmax_t nconns;
-	union {
-		uint32_t flags;
-		struct {
-			uint16_t handshake_flags;
-			uint16_t transmission_flags;
-		};
-	} flags1;
 	int nargs, nsockets;
 	long tid;
 	bool tls;
@@ -847,73 +895,100 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Invalid number of connections.");
 		return;
 	}
-	gctl_change_param(req, "verb", -1, "info");
-	gctl_rw_param(req, "name", sizeof(name), name);
-	gctl_rw_param(req, "host", sizeof(host), host);
-	gctl_rw_param(req, "port", sizeof(port), port);
-	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
-	gctl_rw_param(req, "tls", sizeof(tls), &tls);
-	gctl_rw_param(req, "nsockets", sizeof(nsockets), &nsockets);
-	gctl_issue(req);
-	if (req->nerror != 0)
+	classname = gctl_get_ascii(req, "class");
+	geomname = gctl_get_ascii(req, "arg0");
+	if (geom_gettree_geom(&mesh, classname, geomname, 0) != 0) {
+		gctl_error(req, "Cannot get GEOM tree.");
 		return;
-	if (req->error != NULL) {
-		if (strcmp(req->error, "Could not allocate memory") != 0)
-			free(req->error);
-		req->error = NULL;
 	}
-	gctl_change_param(req, "verb", -1, "scale");
-	gctl_delete_param(req, "name");
-	gctl_delete_param(req, "host");
-	gctl_delete_param(req, "port");
-	gctl_delete_param(req, "flags");
-	gctl_delete_param(req, "tls");
-	gctl_delete_param(req, "nsockets");
-	if ((flags1.transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
-	    nconns > 1) {
+	mp = find_class(&mesh, classname);
+	if (mp == NULL) {
+		gctl_error(req, "Cannot find GEOM class.");
+		goto free;
+	}
+	gp = find_geom(mp, geomname);
+	if (gp == NULL) {
+		gctl_error(req, "Cannot find GEOM '%s'.", geomname);
+		goto free;
+	}
+	tflags = find_config(gp, "TransmissionFlags");
+	if (tflags == NULL) {
+		gctl_error(req, "Invalid config (missing TransmissionFlags).");
+		goto free;
+	}
+	if (strstr(tflags, "CAN_MULTI_CONN") == NULL && nconns > 1) {
 		gctl_error(req, "Server does not allow multiple connections.");
-		return;
+		goto free;
+	}
+	connections = find_config(gp, "Connections");
+	if (connections == NULL) {
+		gctl_error(req, "Invalid config (missing Connections).");
+		goto free;
+	}
+	nsockets = strtol(connections, NULL, 10);
+	if (nsockets == 0) {
+		gctl_error(req, "Invalid config (invalid Connections).");
+		goto free;
 	}
 	if (nsockets == nconns)
 		/* Nothing to do. */
-		return;
+		goto free;
 	if (nsockets > nconns) {
 		/* Scale down. */
 		gctl_issue(req);
-		return;
+		goto free;
 	}
 	nsockets = nconns - nsockets;
 	assert(nsockets > 0);
 	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
 		gctl_error(req, "Failed to get resource limits.");
-		return;
+		goto free;
 	}
 	if (nsockets > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
 		gctl_error(req, "Number of connections exceeds limits.");
-		return;
+		goto free;
 	}
 	thr_self(&tid);
 	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
-	client.host = host;
-	client.port = port;
+	client.host = find_config(gp, "Host");
+	if (client.host == NULL) {
+		gctl_error(req, "Invalid config (missing Host).");
+		goto free;
+	}
+	client.port = find_config(gp, "Port");
+	if (client.port == NULL) {
+		gctl_error(req, "Invalid config (missing Port).");
+		goto free;
+	}
+	cfgtls = find_config(gp, "TLS");
+	if (cfgtls == NULL) {
+		gctl_error(req, "Invalid config (missing TLS).");
+		goto free;
+	}
+	tls = strcmp(cfgtls, "yes") == 0;
 #ifdef WITH_OPENSSL
 	if (nbd_client_tls_init(&client) != 0)
-		return;
+		goto free;
 	if (tls && client.ssl_ctx == NULL) {
 		gctl_error(req, "TLS is used on this device.");
-		return;
+		goto free;
 	}
 	if (!tls && client.ssl_ctx != NULL) {
 		gctl_error(req, "TLS is not used on this device.");
-		return;
+		goto free;
 	}
 #else
 	if (tls) {
 		gctl_error(req, "TLS is used on this device.");
-		return;
+		goto free;
 	}
 #endif
+	name = find_config(gp, "Name");
+	if (name == NULL) {
+		gctl_error(req, "Invalid config (missing Name).");
+		goto free;
+	}
 	client.name = strdup(name);
 	assert(client.name != NULL); /* can't do much if ENOMEM */
 	sockets = malloc(sizeof(*sockets) * nsockets);
@@ -942,121 +1017,5 @@ free:
 	/* Didn't ask for these, but in case we got them anyway... */
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));
-}
-
-static void
-nbd_info(struct gctl_req *req, unsigned flags)
-{
-	char description[PAGE_SIZE]; /* oof */
-	char name[PATH_MAX];
-	char host[PATH_MAX];
-	char port[32];
-	uint64_t size;
-	union {
-		uint32_t flags;
-		struct {
-			uint16_t handshake_flags;
-			uint16_t transmission_flags;
-		};
-	} flags1;
-	uint32_t minblocksize;
-	uint32_t prefblocksize;
-	uint32_t maxpayload;
-	u_int nsockets;
-	int nargs;
-	bool tls;
-
-	nargs = gctl_get_int(req, "nargs");
-	if (nargs != 1) {
-		gctl_error(req, "Invalid number of arguments.");
-		return;
-	}
-	gctl_rw_param(req, "name", sizeof(name), name);
-	gctl_rw_param(req, "host", sizeof(host), host);
-	gctl_rw_param(req, "port", sizeof(port), port);
-	gctl_rw_param(req, "description", sizeof(description), description);
-	gctl_rw_param(req, "size", sizeof(size), &size);
-	gctl_rw_param(req, "flags", sizeof(flags1), &flags1);
-	gctl_rw_param(req, "tls", sizeof(tls), &tls);
-	gctl_rw_param(req, "minblocksize", sizeof(minblocksize), &minblocksize);
-	gctl_rw_param(req, "prefblocksize", sizeof(prefblocksize),
-	    &prefblocksize);
-	gctl_rw_param(req, "maxpayload", sizeof(maxpayload), &maxpayload);
-	gctl_rw_param(req, "nsockets", sizeof(nsockets), &nsockets);
-	gctl_issue(req);
-	name[sizeof(name) - 1] = '\0';
-	description[sizeof(description) - 1] = '\0';
-	host[sizeof(host) - 1] = '\0';
-	port[sizeof(port) - 1] = '\0';
-	printf("Name: %s\n", name);
-	printf("Description: %s\n", description);
-	printf("Host: %s\n", host);
-	printf("Port: %s\n", port);
-	printf("Size: %zd\n", size);
-#define NBD_FLAG(id) { NBD_FLAG_ ## id, #id }
-	printf("Handshake flags: 0x%04x", flags1.handshake_flags);
-	if (flags1.handshake_flags != 0) {
-		const struct { uint16_t flag; const char *name; } names[] = {
-			NBD_FLAG(FIXED_NEWSTYLE),
-			NBD_FLAG(NO_ZEROES),
-		};
-		uint32_t unknown, check = 0;
-		int i;
-
-		printf("<");
-		for (i = 0; i < nitems(names); i++) {
-			uint16_t flag = names[i].flag;
-
-			if ((flags1.handshake_flags & flag) != 0) {
-				printf("%s%s", check != 0 ? "," : "", names[i].name);
-				check |= flag;
-			}
-		}
-		unknown = flags1.handshake_flags & ~check;
-		if (unknown != 0)
-			printf("%s0x%x", check != 0 ? "," : "", unknown);
-		printf(">");
-	}
-	printf("\n");
-	printf("Transmission flags: 0x%04x", flags1.transmission_flags);
-	if (flags1.transmission_flags != 0) {
-		const struct { uint16_t flag; const char *name; } names[] = {
-			NBD_FLAG(HAS_FLAGS),
-			NBD_FLAG(READ_ONLY),
-			NBD_FLAG(SEND_FLUSH),
-			NBD_FLAG(SEND_FUA),
-			NBD_FLAG(ROTATIONAL),
-			NBD_FLAG(SEND_TRIM),
-			NBD_FLAG(SEND_WRITE_ZEROES),
-			NBD_FLAG(SEND_DF),
-			NBD_FLAG(CAN_MULTI_CONN),
-			NBD_FLAG(SEND_RESIZE),
-			NBD_FLAG(SEND_CACHE),
-			NBD_FLAG(SEND_FAST_ZERO),
-			NBD_FLAG(BLOCK_STATUS_PAYLOAD),
-		};
-		uint32_t unknown, check = 0;
-		int i;
-
-		printf("<");
-		for (i = 0; i < nitems(names); i++) {
-			uint16_t flag = names[i].flag;
-
-			if ((flags1.transmission_flags & flag) != 0) {
-				printf("%s%s", check != 0 ? "," : "", names[i].name);
-				check |= flag;
-			}
-		}
-		unknown = flags1.transmission_flags & ~check;
-		if (unknown != 0)
-			printf("%s0x%x", check != 0 ? "," : "", unknown);
-		printf(">");
-	}
-	printf("\n");
-#undef NBD_FLAG
-	printf("TLS: %s\n", tls ? "yes" : "no");
-	printf("Minimum block size: %u\n", minblocksize);
-	printf("Preferred block size: %u\n", prefblocksize);
-	printf("Maximum payload: %u\n", maxpayload);
-	printf("Number of connections: %u\n", nsockets);
+	geom_deletetree(&mesh);
 }

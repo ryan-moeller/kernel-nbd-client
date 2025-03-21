@@ -18,6 +18,7 @@
 #include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/refcount.h>
+#include <sys/sbuf.h>
 #include <sys/sched.h>
 #include <sys/sema.h>
 #include <sys/socket.h>
@@ -1390,76 +1391,6 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	g_free(sockets);
 }
 
-static inline int
-set_info(struct gctl_req *req, const char *param, const void *p, size_t len)
-{
-	switch (gctl_set_param(req, param, p, len)) {
-	case EPERM:
-		gctl_error(req, "No write access %s argument", param);
-		return (EPERM);
-	case ENOSPC:
-		gctl_error(req, "Wrong length %s argument", param);
-		return (ENOSPC);
-	default:
-		return (0);
-	}
-}
-
-static void
-g_nbd_ctl_info(struct gctl_req *req, struct g_class *mp)
-{
-	struct g_nbd_softc *sc;
-	struct g_geom *gp;
-	const char *name;
-
-	g_topology_assert();
-
-	G_NBD_DEBUG(2, "%s", __func__);
-	name = gctl_get_asciiparam(req, "arg0");
-	if (name == NULL) {
-		gctl_error(req, "Missing device.");
-		return;
-	}
-	gp = g_nbd_find_geom(mp, name);
-	if (gp == NULL) {
-		gctl_error(req, "Device '%s' is invalid.", name);
-		return;
-	}
-	sc = gp->softc;
-	if (set_info(req, "name", sc->sc_name, strlen(sc->sc_name) + 1) != 0)
-		return;
-	if (sc->sc_description != NULL) {
-		if (set_info(req, "description", sc->sc_description,
-		    strlen(sc->sc_description) + 1) != 0)
-			return;
-	} else {
-		if (set_info(req, "description", "", 1) != 0)
-			return;
-	}
-	if (set_info(req, "host", sc->sc_host, strlen(sc->sc_host) + 1) != 0)
-		return;
-	if (set_info(req, "port", sc->sc_port, strlen(sc->sc_port) + 1) != 0)
-		return;
-	if (set_info(req, "size", &sc->sc_size, sizeof(sc->sc_size)) != 0)
-		return;
-	if (set_info(req, "flags", &sc->sc_flags, sizeof(sc->sc_flags)) != 0)
-		return;
-	if (set_info(req, "tls", &sc->sc_tls, sizeof(sc->sc_tls)) != 0)
-		return;
-	if (set_info(req, "minblocksize", &sc->sc_minblocksize,
-	    sizeof(sc->sc_minblocksize)) != 0)
-		return;
-	if (set_info(req, "prefblocksize", &sc->sc_prefblocksize,
-	    sizeof(sc->sc_prefblocksize)) != 0)
-		return;
-	if (set_info(req, "maxpayload", &sc->sc_maxpayload,
-	    sizeof(sc->sc_maxpayload)) != 0)
-		return;
-	if (set_info(req, "nsockets", &sc->sc_nconns,
-	    sizeof(sc->sc_nconns)) != 0)
-		return;
-}
-
 static inline void
 g_nbd_destroy(struct g_nbd_softc *sc)
 {
@@ -1519,9 +1450,6 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 		return;
 	} else if (strcmp(verb, "scale") == 0) {
 		g_nbd_ctl_scale(req, mp);
-		return;
-	} else if (strcmp(verb, "info") == 0) {
-		g_nbd_ctl_info(req, mp);
 		return;
 	} else if (strcmp(verb, "disconnect") == 0) {
 		g_nbd_ctl_disconnect(req, mp);
@@ -1778,6 +1706,102 @@ g_nbd_start(struct bio *bp)
 	g_nbd_issue(sc, bp);
 }
 
+static void
+g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
+    struct g_consumer *cp, struct g_provider *pp)
+{
+	struct g_nbd_softc *sc;
+
+	g_topology_assert();
+
+	if (pp != NULL)
+		return;
+	sc = gp->softc;
+	if (sc == NULL)
+		return;
+	sbuf_printf(sb, "%s<Host>%s</Host>\n", indent, sc->sc_host);
+	sbuf_printf(sb, "%s<Port>%s</Port>\n", indent, sc->sc_port);
+	sbuf_printf(sb, "%s<Name>%s</Name>\n", indent, sc->sc_name);
+	if (sc->sc_description != NULL)
+		sbuf_printf(sb, "%s<Description>%s</Description>\n", indent,
+		    sc->sc_description);
+	sbuf_printf(sb, "%s<Size>%lu</Size>\n", indent, sc->sc_size);
+#define NBD_FLAG(id) { NBD_FLAG_ ## id, #id }
+	sbuf_printf(sb, "%s<HandshakeFlags>", indent);
+	if (sc->sc_handshake_flags == 0)
+		sbuf_cat(sb, "NONE");
+	else {
+		const struct { uint16_t flag; const char *name; } flags[] = {
+			NBD_FLAG(FIXED_NEWSTYLE),
+			NBD_FLAG(NO_ZEROES),
+		};
+		uint16_t unknown, check = 0;
+
+		for (int i = 0; i < nitems(flags); i++) {
+			if ((sc->sc_handshake_flags & flags[i].flag) != 0) {
+				if (check != 0)
+					sbuf_cat(sb, ", ");
+				sbuf_cat(sb, flags[i].name);
+				check |= flags[i].flag;
+			}
+		}
+		unknown = sc->sc_handshake_flags & ~check;
+		if (unknown != 0) {
+			if (check != 0)
+				sbuf_cat(sb, ", ");
+			sbuf_printf(sb, "0x%x", unknown);
+		}
+	}
+	sbuf_cat(sb, "</HandshakeFlags>\n");
+	sbuf_printf(sb, "%s<TransmissionFlags>", indent);
+	if (sc->sc_transmission_flags == 0)
+		sbuf_cat(sb, "NONE");
+	else {
+		const struct { uint16_t flag; const char *name; } flags[] = {
+			NBD_FLAG(HAS_FLAGS),
+			NBD_FLAG(READ_ONLY),
+			NBD_FLAG(SEND_FLUSH),
+			NBD_FLAG(SEND_FUA),
+			NBD_FLAG(ROTATIONAL),
+			NBD_FLAG(SEND_TRIM),
+			NBD_FLAG(SEND_WRITE_ZEROES),
+			NBD_FLAG(SEND_DF),
+			NBD_FLAG(CAN_MULTI_CONN),
+			NBD_FLAG(SEND_RESIZE),
+			NBD_FLAG(SEND_CACHE),
+			NBD_FLAG(SEND_FAST_ZERO),
+			NBD_FLAG(BLOCK_STATUS_PAYLOAD),
+		};
+		uint16_t unknown, check = 0;
+
+		for (int i = 0; i < nitems(flags); i++) {
+			if ((sc->sc_transmission_flags & flags[i].flag) != 0) {
+				if (check != 0)
+					sbuf_cat(sb, ", ");
+				sbuf_cat(sb, flags[i].name);
+				check |= flags[i].flag;
+			}
+		}
+		unknown = sc->sc_transmission_flags & ~check;
+		if (unknown != 0) {
+			if (check != 0)
+				sbuf_cat(sb, ", ");
+			sbuf_printf(sb, "0x%x", unknown);
+		}
+	}
+	sbuf_cat(sb, "</TransmissionFlags>\n");
+#undef NBD_FLAG
+	sbuf_printf(sb, "%s<MinimumBlocksize>%u</MinimumBlocksize>\n", indent,
+	    sc->sc_minblocksize);
+	sbuf_printf(sb, "%s<PreferredBlocksize>%u</PreferredBlocksize>\n",
+	    indent, sc->sc_prefblocksize);
+	sbuf_printf(sb, "%s<MaximumPayload>%u</MaximumPayload>\n", indent,
+	    sc->sc_maxpayload);
+	sbuf_printf(sb, "%s<TLS>%s</TLS>\n", indent, sc->sc_tls ? "yes" : "no");
+	sbuf_printf(sb, "%s<Connections>%u</Connections>\n", indent,
+	    sc->sc_nconns);
+}
+
 static struct g_class g_nbd_class = {
 	.name = G_NBD_CLASS_NAME,
 	.version = G_VERSION,
@@ -1786,6 +1810,7 @@ static struct g_class g_nbd_class = {
 	.init = g_nbd_init,
 	.fini = g_nbd_fini,
 	.start = g_nbd_start,
+	.dumpconf = g_nbd_dumpconf,
 	.access = g_std_access,
 };
 
