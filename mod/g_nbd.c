@@ -55,6 +55,9 @@ SYSCTL_INT(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
 static int recvspace = 1536 * 1024;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
     "Default socket receive buffer size");
+static int identfmt = 0;
+SYSCTL_INT(_kern_geom_nbd, OID_AUTO, identfmt, CTLFLAG_RWTUN, &identfmt, 0,
+    "Format of GEOM::ident (0=host:port/name, 1=name||host:port/name, 2=name)");
 
 #define G_NBD_DEBUG(lvl, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
@@ -1633,6 +1636,53 @@ g_nbd_advance(struct bio *bp, off_t offset)
 	}
 }
 
+static inline int
+g_nbd_format_ident_full(struct g_nbd_softc *sc, struct bio *bp)
+{
+	if (snprintf(bp->bio_data, bp->bio_length, "%s:%s/%s",
+	    sc->sc_host, sc->sc_port, sc->sc_name) >= bp->bio_length)
+		return (EFAULT);
+	return (0);
+}
+
+static inline int
+g_nbd_format_ident_name(struct g_nbd_softc *sc, struct bio *bp)
+{
+	if (snprintf(bp->bio_data, bp->bio_length, "%s", sc->sc_name)
+	    >= bp->bio_length)
+		return (EFAULT);
+	return (0);
+}
+
+static inline int
+g_nbd_handleattr_ident(struct g_nbd_softc *sc, struct bio *bp)
+{
+	int error = 0;
+
+	if (strcmp(bp->bio_attribute, "GEOM::ident") != 0)
+		return (0);
+	memset(bp->bio_data, 0, bp->bio_length);
+	switch (identfmt) {
+	default:
+	case 0:
+		error = g_nbd_format_ident_full(sc, bp);
+		break;
+	case 1:
+		if (strcmp(sc->sc_name, "") == 0)
+			error = g_nbd_format_ident_full(sc, bp);
+		else
+			error = g_nbd_format_ident_name(sc, bp);
+		break;
+	case 2:
+		error = g_nbd_format_ident_name(sc, bp);
+		break;
+	}
+	if (error == 0)
+		bp->bio_completed = bp->bio_length;
+	g_io_deliver(bp, error);
+	return (1);
+}
+
 static void
 g_nbd_start(struct bio *bp)
 {
@@ -1707,20 +1757,8 @@ g_nbd_start(struct bio *bp)
 		    (sc->sc_transmission_flags & NBD_FLAG_ROTATIONAL) != 0 ?
 		    DISK_RR_UNKNOWN : DISK_RR_NON_ROTATING))
 			return;
-		if (strcmp(bp->bio_attribute, "GEOM::ident") == 0) {
-			int error = 0;
-
-			memset(bp->bio_data, 0, bp->bio_length);
-			/* TODO: configurable ident format may be useful */
-			if (snprintf(bp->bio_data, bp->bio_length,
-			    "%s:%s/%s", sc->sc_host, sc->sc_port, sc->sc_name)
-			    >= bp->bio_length)
-				error = EFAULT;
-			else
-				bp->bio_completed = bp->bio_length;
-			g_io_deliver(bp, error);
+		if (g_nbd_handleattr_ident(sc, bp) != 0)
 			return;
-		}
 		if (sc->sc_description != NULL &&
 		    g_handleattr_str(bp, "GEOM::descr", sc->sc_description))
 			return;
