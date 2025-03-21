@@ -8,10 +8,10 @@
 .Nm gnbd
 .Nd "control utility for the network block device GEOM class"
 .Sh SYNOPSIS
-To load the GEOM_ELI module at bood time, add the following line
+To load the GEOM_ELI module at boot time, add the following line
 to your
 .Xr loader.conf 5 :
--Bd -literal -offset indent
+.Bd -literal -offset indent
 geom_nbd_load="YES"
 .Ed
 .Pp
@@ -52,11 +52,11 @@ utility:
 .Nm
 .Cm list
 .Op Fl a
-.Op Ar name ...
+.Op Ar prov ...
 .Nm
 .Cm status
 .Op Fl ags
-.Op Ar name ...
+.Op Ar prov ...
 .Nm
 .Cm load
 .Op Fl v
@@ -190,11 +190,11 @@ nbd1
 .Pp
 Scale the second provider up to 8 connections:
 .Bd -literal -offset indent
-# gnbd scale -c 8 -A ca-crt.pem -C cert.pem -K key.pem servername
+# gnbd scale -c 8 -A cacert.pem -C cert.pem -K key.pem servername
 .Ed
 .Pp
 Disconnect the previous examples:
-.Bd -literal -offset -in
+.Bd -literal -offset indent
 # gnbd disconnect nbd0
 # gnbd disconnect nbd1
 .Ed
