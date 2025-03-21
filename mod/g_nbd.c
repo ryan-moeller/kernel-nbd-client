@@ -332,7 +332,6 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	if (cmd == NBD_CMD_WRITE) {
 		struct mbuf *d;
 
-		/* TODO: BIO_VLIST? */
 		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 			struct mbuf *m_tail = m;
 			size_t page_offset = bp->bio_ma_offset;
@@ -631,7 +630,6 @@ nbd_conn_recv(struct nbd_conn *nc)
 			return;
 		}
 		G_NBD_LOGREQ(3, bp, "%s received read data", __func__);
-		/* TODO: BIO_VLIST? */
 		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 			vm_offset_t vaddr;
 			size_t page_offset = bp->bio_ma_offset;
@@ -1585,7 +1583,6 @@ g_nbd_limit(struct g_nbd_softc *sc, struct bio *bp)
 	if (bp->bio_length <= maxsz)
 		return (false);
 	bp->bio_length = maxsz;
-	/* TODO: BIO_VLIST? */
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0)
 		bp->bio_ma_n =
 		    howmany(bp->bio_ma_offset + bp->bio_length, PAGE_SIZE);
@@ -1624,7 +1621,6 @@ g_nbd_advance(struct bio *bp, off_t offset)
 {
 	bp->bio_offset += offset;
 	bp->bio_length -= offset;
-	/* TODO: BIO_VLIST? */
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 		bp->bio_ma += offset / PAGE_SIZE;
 		bp->bio_ma_offset += offset;
@@ -1723,6 +1719,14 @@ g_nbd_start(struct bio *bp)
 		break;
 	case BIO_READ:
 	case BIO_WRITE:
+		/*
+		 * XXX: Nothing seems to ever set this flag, and most GEOM
+		 * classes never check for it.  Assume we will never see a bio
+		 * with it for now.
+		 */
+		KASSERT((bp->bio_flags & BIO_VLIST) == 0,
+		    ("GEOM_NBD does not handle BIO_VLIST"));
+
 		offset = 0;
 		bp2 = NULL;
 		bp1 = g_clone_bio(bp);
