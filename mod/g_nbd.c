@@ -1490,7 +1490,6 @@ g_nbd_ctl_disconnect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "Missing device.");
 		return;
 	}
-	/* TODO: 'force' argument? */
 	gp = g_nbd_find_geom(mp, name);
 	if (gp == NULL) {
 		gctl_error(req, "Device '%s' is invalid.", name);

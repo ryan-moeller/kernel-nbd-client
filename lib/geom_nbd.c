@@ -94,11 +94,8 @@ struct g_command class_commands[] = {
 	    "prov"
 	},
 	{ "disconnect", 0, NULL,
-	    {
-		{ 'f', "force", NULL, G_TYPE_BOOL },
-		G_OPT_SENTINEL
-	    },
-	    "[-f] prov"
+	    G_NULL_OPTS,
+	    "prov"
 	},
 	G_CMD_SENTINEL
 };
