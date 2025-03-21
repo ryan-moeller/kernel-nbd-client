@@ -6,6 +6,7 @@
 
 #include <sys/param.h>
 #include <sys/endian.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/thr.h>
 
@@ -725,6 +726,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 {
 	char provider[PATH_MAX];
 	struct nbd_client client = {};
+	struct rlimit nofile;
 	int *sockets = NULL;
 	intmax_t nconns;
 	int nargs, nsockets;
@@ -737,9 +739,16 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		return;
 	}
 	nconns = gctl_get_intmax(req, "connections");
-	/* TODO: could check process limits for max */
 	if (nconns < 1) {
 		gctl_error(req, "Invalid number of connections.");
+		return;
+	}
+	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
+		gctl_error(req, "Failed to get resource limits.");
+		return;
+	}
+	if (nconns > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
+		gctl_error(req, "Number of connections exceeds limits.");
 		return;
 	}
 	nsockets = nconns;
@@ -817,6 +826,7 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 {
 	char name[PATH_MAX], host[PATH_MAX], port[32];
 	struct nbd_client client = {};
+	struct rlimit nofile;
 	int *sockets = NULL;
 	intmax_t nconns;
 	union {
@@ -836,7 +846,6 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		return;
 	}
 	nconns = gctl_get_intmax(req, "connections");
-	/* TODO: could check process limits for max */
 	if (nconns < 1) {
 		gctl_error(req, "Invalid number of connections.");
 		return;
@@ -878,6 +887,14 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	}
 	nsockets = nconns - nsockets;
 	assert(nsockets > 0);
+	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
+		gctl_error(req, "Failed to get resource limits.");
+		return;
+	}
+	if (nsockets > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
+		gctl_error(req, "Number of connections exceeds limits.");
+		return;
+	}
 	thr_self(&tid);
 	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
