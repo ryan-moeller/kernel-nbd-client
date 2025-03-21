@@ -1188,11 +1188,23 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'minimum_blocksize' argument.");
 		return;
 	}
+	if (*minbsp > *sizep) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'minimum_blocksize' argument.");
+		return;
+	}
 	prefbsp = gctl_get_paraml(req, "preferred_blocksize", sizeof(*prefbsp));
 	if (prefbsp == NULL) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "No 'preferred_blocksize' argument.");
+		return;
+	}
+	if (*minbsp > *prefbsp) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'preferred_blocksize' argument.");
 		return;
 	}
 	maxpayloadp = gctl_get_paraml(req, "maximum_payload",
@@ -1207,6 +1219,12 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	if (maxsz > maxpayload) {
 		G_NBD_DEBUG(1, "limiting max payload size to %d", maxpayload);
 		maxsz = maxpayload;
+	}
+	if (*minbsp > maxsz) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'maximum_payload' argument.");
+		return;
 	}
 	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
 	if (cp == NULL) {
@@ -1266,7 +1284,6 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	SLIST_INIT(&sc->sc_connections);
 	mtx_init(&sc->sc_conns_mtx, "gnbd:connections", NULL, MTX_DEF);
 	sx_init(&sc->sc_flush_lock, "gnbd:flush");
-	/* TODO: validate arguments */
 	gp->softc = sc;
 	pp = g_new_providerf(gp, "%s", gp->name);
 	pp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE |
