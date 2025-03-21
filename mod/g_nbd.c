@@ -1692,6 +1692,16 @@ g_nbd_start(struct bio *bp)
 		g_io_deliver(bp, ENXIO);
 		return;
 	}
+	/*
+	 * XXX: Nothing seems to ever set this flag, and most GEOM
+	 * classes never check for it.  Assume we will never see a bio
+	 * with it for now.
+	 */
+	if ((bp->bio_flags & BIO_VLIST) != 0) {
+		G_NBD_LOGREQ(1, bp, "%s BIO_VLIST not implemented", __func__);
+		g_io_deliver(bp, EFAULT);
+		return;
+	}
 	switch (bp->bio_cmd) {
 	case BIO_DELETE:
 	case BIO_FLUSH:
@@ -1719,14 +1729,6 @@ g_nbd_start(struct bio *bp)
 		break;
 	case BIO_READ:
 	case BIO_WRITE:
-		/*
-		 * XXX: Nothing seems to ever set this flag, and most GEOM
-		 * classes never check for it.  Assume we will never see a bio
-		 * with it for now.
-		 */
-		KASSERT((bp->bio_flags & BIO_VLIST) == 0,
-		    ("GEOM_NBD does not handle BIO_VLIST"));
-
 		offset = 0;
 		bp2 = NULL;
 		bp1 = g_clone_bio(bp);
