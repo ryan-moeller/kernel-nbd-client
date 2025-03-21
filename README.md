@@ -16,6 +16,13 @@ This client supports the following noteworthy features:
 * Supports optional TLS encryption using ktls(4).
 * It is fast - zero copies are performed where possible.
 
+## Prerequisites
+
+Building this project requires the FreeBSD base system and sources.  There are
+no external dependencies.
+
+The base system OpenSSL is used for TLS support.
+
 ## Building and Installing
 
 To build and install for a production kernel:
@@ -23,6 +30,13 @@ To build and install for a production kernel:
 ```
 # make
 # make install
+```
+
+The Makefiles assume the FreeBSD source tree is placed at /usr/src but this can
+be overridden:
+
+```
+# make SRCTOP=/path/to/my/freebsd
 ```
 
 To build for a debug kernel with INVARIANTS:
