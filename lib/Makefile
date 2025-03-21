@@ -20,6 +20,9 @@ CFLAGS+=-DWITH_OPENSSL
 LDADD+=	-lssl -lcrypto
 #.endif
 
+# Not needed when in tree
+LINKS=	/sbin/geom /sbin/gnbd
+
 .PATH: ${SRCTOP}/sbin/geom/misc
 
 .include <bsd.lib.mk>
