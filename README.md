@@ -43,7 +43,7 @@ To build for a debug kernel with INVARIANTS:
 
 ```
 # make DEBUG_FLAGS="-g -O0 -DWITNESS -DINVARIANTS"
-# make install
+# make DEBUG_FLAGS="-g -O0 -DWITNESS -DINVARIANTS" install
 ```
 
 ## Usage
@@ -389,3 +389,9 @@ socket[
 ]
 (lldb)
 ```
+
+Note: the kernel module must be built with debug symbols by setting DEBUG_FLAGS
+in the invocation of `make` for the lldb script to work.  Then when loaded by
+`make load` from the mod/ directory without being installed, the symbols will be
+automatically found by lldb.  Otherwise when installing, DEBUG_FLAGS must also
+be set in the invocation of `make install` for debug symbols to be installed.
