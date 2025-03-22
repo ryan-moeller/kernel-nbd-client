@@ -208,7 +208,7 @@ the repository from GitHub and checkout a known good commit, then patch a few
 things so we can build only the nbd-server program on FreeBSD:
 
 ```
-# pkg install autotools autoconf-archive pkgconf docbook2X glib
+# pkg install autotools autoconf-archive bison docbook2X glib pkgconf
 # git clone https://github.com/NetworkBlockDevice/nbd.git
 # cd nbd
 # git checkout 7a64238499823456bb83cdbfe6811f5db468b35b
