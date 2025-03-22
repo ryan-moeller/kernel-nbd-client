@@ -1,5 +1,10 @@
 # FreeBSD GEOM NBD Client
 
+| FreeBSD Version | Status |
+| --------------- | ------ |
+| 14.2-RELEASE    | [![14.2-RELEASE Build Status](https://api.cirrus-ci.com/github/ryan-moeller/kernel-nbd-client.svg?task=releases/amd64/14.2-RELEASE)](https://cirrus-ci.com/github/ryan-moeller/kernel-nbd-client?task=releases/amd64/14.2-RELEASE) |
+| 15.0-CURRENT    | [![15.0-CURRENT Build Status](https://api.cirrus-ci.com/github/ryan-moeller/kernel-nbd-client.svg?task=snapshots/amd64/15.0-CURRENT)](https://cirrus-ci.com/github/ryan-moeller/kernel-nbd-client?task=snapshots/amd64/15.0-CURRENT) |
+
 This is a Network Block Device (NBD) client for the FreeBSD kernel GEOM
 framework.
 
