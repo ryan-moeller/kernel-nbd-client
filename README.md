@@ -241,7 +241,7 @@ a sparse file for the server to export.  Then we can start the server:
 # mkdir tmp
 # mount -t tmpfs tmp ./tmp
 # truncate -s 4g ./tmp/nbdfile
-# ./nbd/nbd-server 10809 ./tmp/nbdfile -C ./nbdconfig
+# ./nbd/nbd-server 10809 ${PWD}/tmp/nbdfile -C ./nbdconfig
 ```
 
 With the server running, we can connect the client and run some disk tests:
