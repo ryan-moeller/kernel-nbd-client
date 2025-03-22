@@ -39,11 +39,20 @@ be overridden:
 # make SRCTOP=/path/to/my/freebsd
 ```
 
-To build for a debug kernel with INVARIANTS:
+To build for a debug kernel with WITNESS and INVARIANTS:
 
 ```
 # make DEBUG_FLAGS="-g -O0 -DWITNESS -DINVARIANTS"
 # make DEBUG_FLAGS="-g -O0 -DWITNESS -DINVARIANTS" install
+```
+
+Note: you can check which of WITNESS and INVARIANTS need to be defined for the
+running kernel:
+
+```
+# sysctl kern.conftxt | egrep '(WITNESS|INVARIANTS)$'
+options WITNESS
+options INVARIANTS
 ```
 
 ## Usage
