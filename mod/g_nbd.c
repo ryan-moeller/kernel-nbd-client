@@ -344,7 +344,11 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			for (int i = 0; resid > 0; i++) {
 				if (d == NULL) {
 					d = mb_alloc_ext_pgs(M_NOWAIT,
-					    nbd_inflight_free_mext, 0);
+#if __FreeBSD_version > 1500026
+					    nbd_inflight_free_mext, M_RDONLY);
+#else
+					    nbd_inflight_free_mext);
+#endif
 					if (d == NULL) {
 						m_freem(m);
 						nbd_conn_remove_inflight_specific(
@@ -979,6 +983,12 @@ nbd_conn_receiver(void *arg)
 	sema_post(&nc->nc_receiver_done);
 	kthread_exit();
 }
+
+/* Not in releases yet. */
+#ifndef SLIST_EMPTY_ATOMIC
+#define SLIST_EMPTY_ATOMIC(head) \
+	(atomic_load_ptr(&(head)->slh_first) == NULL)
+#endif
 
 static void
 g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
