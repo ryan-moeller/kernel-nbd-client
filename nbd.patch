@@ -1,0 +1,114 @@
+diff --git a/Makefile.am b/Makefile.am
+index b32ec81..88b4806 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -1,59 +1,18 @@
+ ACLOCAL_AMFLAGS = -I support
+-SUBDIRS = . man doc tests systemd
+-bin_PROGRAMS = nbd-server nbd-trdump nbd-trplay
+-EXTRA_PROGRAMS = nbd-client make-integrityhuge
+-noinst_LTLIBRARIES = libnbdsrv.la libcliserv.la libnbdclt.la
++SUBDIRS = .
++bin_PROGRAMS = nbd-server
++noinst_LTLIBRARIES = libnbdsrv.la libcliserv.la
+ libcliserv_la_SOURCES = cliserv.h cliserv.c
+ libcliserv_la_CFLAGS = @CFLAGS@
+-client_srcs = nbd-client.c cliserv.h nbd-netlink.h
+ nbd_server_SOURCES = nbd-server.c cliserv.h lfs.h nbd.h nbdsrv.h backend.h \
+ 	netdb-compat.h nbd-helper.h
+-nbd_trdump_SOURCES = nbd-trdump.c cliserv.h nbd.h
+-nbd_trplay_SOURCES = nbd-trplay.c cliserv.h nbd.h
+-client_flags = @CFLAGS@
+ nbd_server_CFLAGS = @CFLAGS@ @GLIB_CFLAGS@
+-nbd_trdump_CFLAGS = @CFLAGS@ @GLIB_CFLAGS@
+-nbd_trplay_CFLAGS = @CFLAGS@ @GLIB_CFLAGS@
+ libnbdsrv_la_SOURCES = nbdsrv.c nbdsrv.h treefiles.c treefiles.h
+ libnbdsrv_la_CFLAGS = @CFLAGS@ @GLIB_CFLAGS@
+-client_libs = libcliserv.la libnbdclt.la
+ nbd_server_LDADD = @GLIB_LIBS@ libnbdsrv.la libcliserv.la
+-nbd_trdump_LDADD = libcliserv.la
+-nbd_trplay_LDADD = libcliserv.la
+-make_integrityhuge_SOURCES = make-integrityhuge.c cliserv.h nbd.h nbd-debug.h
+-EXTRA_DIST = maketr CodingStyle autogen.sh README.md support/genver.sh
+ if GNUTLS
+ nbd_server_CFLAGS += @GnuTLS_CFLAGS@
+ nbd_server_LDADD += @GnuTLS_LIBS@
+ endif
+-if CLIENT
+-sbin_PROGRAMS = nbd-client
+-if GNUTLS
+-sbin_PROGRAMS += min-nbd-client
+-min_nbd_client_SOURCES = $(client_srcs)
+-min_nbd_client_CFLAGS = $(client_flags) -DNOTLS -DPROG_NAME='"min-nbd-client"'
+-min_nbd_client_LDADD = $(client_libs)
+-nbd_client_SOURCES = $(client_srcs) crypto-gnutls.c crypto-gnutls.h buffer.c buffer.h
+-nbd_client_CFLAGS = $(client_flags) @GnuTLS_CFLAGS@ -DPROG_NAME='"nbd-client"'
+-nbd_client_LDADD = $(client_libs) @GnuTLS_LIBS@
+-else
+-nbd_client_SOURCES = $(client_srcs)
+-nbd_client_CFLAGS = $(client_flags) -DNOTLS -DPROG_NAME='"nbd-client"'
+-nbd_client_LDADD = $(client_libs)
+-endif
+-endif
+-
+-libnbdclt_la_SOURCES = nbdtab_parser.tab.h nbdtab_parser.y nbdtab_lexer.l nbdclt.h
+-BUILT_SOURCES = nbdtab_parser.tab.h
+-
+-nbd-client.c: $(builddir)/nbdtab_parser.tab.h
+-nbdtab_parser.tab.h: $(srcdir)/nbdtab_parser.y
+-	bison -d $^ > $@
+ 
+ AM_DISTCHECK_CONFIGURE_FLAGS=--enable-syslog
+-
+-if NETLINK
+-bin_PROGRAMS += nbd-get-status
+-nbd_get_status_SOURCES = nbd-get-status.c cliserv.c
+-nbd_get_status_CFLAGS = @CFLAGS@
+-endif
+diff --git a/autogen.sh b/autogen.sh
+index 807283a..4a03cb5 100755
+--- a/autogen.sh
++++ b/autogen.sh
+@@ -1,4 +1,3 @@
+ #!/bin/sh
+ set -ex
+-make -C systemd -f Makefile.am nbd@.service.sh.in
+ exec autoreconf -f -i
+diff --git a/configure.ac b/configure.ac
+index 5adc670..84c9cf0 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -377,8 +377,6 @@ AC_CONFIG_FILES([Makefile
+ 		 tests/run/Makefile
+ 		 tests/parse/Makefile
+ 		 $MAN_CONFIG_FILES
+-		 systemd/Makefile
+-		 systemd/nbd@.service.sh
+ 		])
+ AC_OUTPUT
+ 
+diff --git a/nbd-server.c b/nbd-server.c
+index 92fd141..086bb28 100644
+--- a/nbd-server.c
++++ b/nbd-server.c
+@@ -55,18 +55,17 @@
+  *	Suriya Soutmun <darksolar@gmail.com>
+  */
+ 
++#include <sys/param.h>
++
+ /* Includes LFS defines, which defines behaviours of some of the following
+  * headers, so must come before those */
+ #include "lfs.h"
+ #define _DEFAULT_SOURCE
+ #define _XOPEN_SOURCE 500 /* to get pread/pwrite */
+-#if NEED_BSD_SOURCE
+ #define _BSD_SOURCE /* to get DT_* macros on some platforms */
+-#endif
+ #define _DARWIN_C_SOURCE /* to get DT_* macros on OS X */
+ 
+ #include <assert.h>
+-#include <sys/types.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/select.h>
