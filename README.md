@@ -299,3 +299,93 @@ Finally, the cleanup:
 # pkill nbd-server
 # umount ./tmp
 ```
+
+## Debugging
+
+As a starting point for debugging the kernel module, an lldb lua script is
+included.  It will collect and print information about the connections in the
+kernel module.  To run the script interactively, first attach lldb to the
+kernel:
+
+```
+# lldb -c /dev/mem /boot/kernel/kernel
+(lldb) target create "/boot/kernel/kernel" --core "/dev/mem"
+Core file '/dev/mem' (x86_64) was loaded.
+(lldb)
+```
+
+Then at the (lldb) prompt:
+
+```
+(lldb) script dofile 'kernel-nbd-client/gnbd.lua'
+(g_nbd_softc) *nc_softc = {
+  sc_host = 0xfffff8033c562130 "localhost"
+  sc_port = 0xfffff80003848e00 "10809"
+  sc_name = 0xfffff8000369a520 ""
+  sc_description = 0x0000000000000000
+  sc_size = 4294967296
+   = {
+    sc_flags = 21037059
+     = (sc_handshake_flags = 3, sc_transmission_flags = 321)
+  }
+  sc_minblocksize = 512
+  sc_prefblocksize = 4096
+  sc_maxpayload = 262144
+  sc_unit = 0
+  sc_tls = true
+  sc_provider = 0xfffff803bc6b1800
+  sc_queue = {
+    tqh_first = NULL
+    tqh_last = 0xfffff803bbbca448
+  }
+  sc_queue_mtx = {
+    lock_object = (lo_name = "gnbd:queue", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb89a80)
+    mtx_lock = 0
+  }
+  sc_connections = {
+    slh_first = 0xfffff80003550e00
+  }
+  sc_nconns = 2
+  sc_conns_mtx = {
+    lock_object = (lo_name = "gnbd:connections", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb89b00)
+    mtx_lock = 0
+  }
+  sc_flush_lock = {
+    lock_object = (lo_name = "gnbd:flush", lo_flags = 36896768, lo_data = 0, lo_witness = 0xfffff8085eb89b80)
+    sx_lock = 1
+  }
+}
+(nbd_conn *) 0xfffff8000b046400
+(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 1
+thread #15: tid = 114432, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8029fc44740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 sender'
+frame #5: 0xffffffff830486a6 geom_nbd.ko`nbd_conn_sender(arg=0xfffff8000b046400) at g_nbd.c:899:4
+thread #16: tid = 114815, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff806a9b24740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 receiver'
+frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff8000b046400) at g_nbd.c:976:3
+socket[
+  options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
+  snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
+  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT,0xffffffffffff0000>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+]
+(nbd_inflight) *tqh_first = {
+  ni_bio = 0xfffff805cf00c900
+  ni_cookie = 0
+  ni_refs = 1
+  ni_inflight = {
+    tqe_next = NULL
+    tqe_prev = 0xfffff8000b046420
+  }
+}
+bio[READ<0>4294963200:4096]
+(nbd_conn *) 0xfffff80003550e00
+(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 0
+thread #17: tid = 114816, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8028d4ff000, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 sender'
+frame #5: 0xffffffff830486a6 geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003550e00) at g_nbd.c:899:4
+thread #18: tid = 114817, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8029fc40740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 receiver'
+frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003550e00) at g_nbd.c:976:3
+socket[
+  options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
+  snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
+  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT,0xffffffffffff0000>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+]
+(lldb)
+```
