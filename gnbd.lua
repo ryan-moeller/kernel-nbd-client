@@ -46,7 +46,9 @@ assert(error_str(0) == "0")
 assert(error_str(97) == "EINTEGRITY")
 
 function bits_str(value, definitions, sep)
-	local bits = value:GetValueAsSigned()
+	local nbytes = value:GetByteSize()
+	local mask = (1 << (nbytes * 8)) - 1
+	local bits = value:GetValueAsUnsigned() & mask
 	local matches = {}
 	local check = 0
 	for name, value in pairs(definitions) do
