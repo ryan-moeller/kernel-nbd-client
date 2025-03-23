@@ -243,14 +243,12 @@ Now, we'll build the client code:
 # cd ..
 ```
 
-To minimize filesystem overhead for the backing file, mount a tmpfs and create
-a sparse file for the server to export.  Then we can start the server:
+To minimize filesystem overhead for the backing file, attach a memory disk for
+for the server to export.  Then we can start the server:
 
 ```
-# mkdir tmp
-# mount -t tmpfs tmp ./tmp
-# truncate -s 4g ./tmp/nbdfile
-# ./nbd/nbd-server 10809 ${PWD}/tmp/nbdfile -C ./nbdconfig
+# MD=$(mdconfig -a -t swap -s 4g)
+# ./nbd/nbd-server 10809 /dev/${MD} -C ./nbdconfig
 ```
 
 With the server running, we can connect the client and run some disk tests:
@@ -306,7 +304,7 @@ Finally, the cleanup:
 # gnbd disconnect nbd0
 # gnbd unload
 # pkill nbd-server
-# umount ./tmp
+# mdconfig -d -u ${MD}
 ```
 
 ## Debugging
