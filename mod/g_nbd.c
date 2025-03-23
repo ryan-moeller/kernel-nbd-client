@@ -74,6 +74,23 @@ enum {
 #define G_NBD_LOGREQ(lvl, bp, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), (bp), __VA_ARGS__)
 
+#define PRINT_SB_FLAGS "\20" \
+    "\20TLS_RX_RESYNC" \
+    "\17SPLICED" \
+    "\16AIO_RUNNING" \
+    "\15STOP" \
+    "\14AUTOSIZE" \
+    "\13IN_TOE" \
+    "\12NOCOALESCE" \
+    "\11KNOTE" \
+    "\10AIO" \
+    "\6UPCALL" \
+    "\5ASYNC" \
+    "\4SEL" \
+    "\3WAIT" \
+    "\2TLS_RX_RUNNING" \
+    "\1TLS_RX"
+
 struct g_nbd_softc;
 
 enum nbd_conn_state {
@@ -327,6 +344,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	    bio_cmd_str(bp), bp->bio_cmd));
 
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
+retry:
 	m = nbd_request_mbuf(tls, &req);
 	if (m == NULL) {
 		nbd_conn_remove_inflight_specific(nc, ni);
@@ -456,15 +474,26 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 		so->so_snd.sb_lowat = needed;
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
-			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more space",
+			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
 			    __func__);
-			sbreserve_locked(so, SO_SND, needed, curthread);
+			G_NBD_DEBUG(G_NBD_DEBUG0,
+			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
+			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
+			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
+			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
+			if (!sbreserve_locked(so, SO_SND, needed, curthread))
+				G_NBD_DEBUG(G_NBD_WARN, "sbreserve failed");
 			so->so_snd.sb_flags |= SB_AUTOSIZE;
+			continue;
 		}
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
+	if (error == EWOULDBLOCK) {
+		G_NBD_DEBUG(G_NBD_WARN, "%s sosend would block", __func__);
+		goto retry;
+	}
 	if (error != 0) {
 		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
 		    error);
@@ -560,60 +589,71 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 }
 
 static int
-nbd_conn_recv_mbuf(struct nbd_conn *nc, size_t len, struct mbuf **mp)
+nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 {
 	struct uio uio;
 	struct socket *so = nc->nc_socket;
 	struct mbuf *m, *m_tail;
+	size_t available, expected;
 	int flags, error;
 
-	memset(&uio, 0, sizeof(uio));
-	uio.uio_resid = len;
-	SOCK_RECVBUF_LOCK(so);
-	while (sbavail(&so->so_rcv) < len) {
+	m = NULL;
+	while (len > 0) {
+		SOCK_RECVBUF_LOCK(so);
 		if (!nbd_conn_recv_ok(nc, NULL)) {
 			SOCK_RECVBUF_UNLOCK(so);
 			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+			m_freem(m);
 			return (ENXIO);
 		}
-		so->so_rcv.sb_lowat = len;
-		if (so->so_rcv.sb_lowat > so->so_rcv.sb_hiwat) {
-			/* XXX: how did we get here? what if this fails? */
-			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more space",
-			    __func__);
-			sbreserve_locked(so, SO_RCV, len, curthread);
-			so->so_rcv.sb_flags |= SB_AUTOSIZE;
+		available = sbavail(&so->so_rcv);
+		if (available < len) {
+			so->so_rcv.sb_lowat = len;
+			sbwait(so, SO_RCV);
+			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
+			available = sbavail(&so->so_rcv);
 		}
-		sbwait(so, SO_RCV);
-	}
-	SOCK_RECVBUF_UNLOCK(so);
-	m = NULL;
-	do {
-		struct mbuf *m1;
+		SOCK_RECVBUF_UNLOCK(so);
+		if (available == 0)
+			continue;
+		memset(&uio, 0, sizeof(uio));
+		uio.uio_resid = expected = MIN(len, available);
+		while (uio.uio_resid > 0) {
+			struct mbuf *m1;
 
-		flags = MSG_DONTWAIT;
-		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
-		if (error != 0) {
-			G_NBD_DEBUG(G_NBD_ERROR, "%s soreceive failed (%d)",
-			    __func__, error);
-			if (error != ENOMEM && error != EINTR &&
-			    error != ERESTART)
-				nbd_conn_degrade_state(nc,
-				    NBD_CONN_HARD_DISCONNECTING);
-			return (error);
+			flags = MSG_DONTWAIT;
+			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
+			if (error == EAGAIN) {
+				G_NBD_DEBUG(G_NBD_DEBUG0,
+				    "len=%zd avail=%zd expected=%zd resid=%zd",
+				    len, available, expected, uio.uio_resid);
+				break;
+			}
+			if (error != 0) {
+				G_NBD_DEBUG(G_NBD_ERROR,
+				    "%s soreceive failed (%d)", __func__,
+				    error);
+				if (error != ENOMEM && error != EINTR &&
+				    error != ERESTART)
+					nbd_conn_degrade_state(nc,
+					    NBD_CONN_HARD_DISCONNECTING);
+				m_freem(m);
+				return (error);
+			}
+			KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
+			    ("%s soreceive truncated", __func__));
+			if (m == NULL)
+				m = m_tail = m1;
+			else {
+				while (m_tail->m_next != NULL)
+					m_tail = m_tail->m_next;
+				m_tail->m_next = m1;
+				m_tail = m1;
+			}
 		}
-		KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
-		    ("%s soreceive truncated", __func__));
-		if (m == NULL)
-			m = m_tail = m1;
-		else {
-			while (m_tail->m_next != NULL)
-				m_tail = m_tail->m_next;
-			m_tail->m_next = m1;
-			m_tail = m1;
-		}
-	} while (uio.uio_resid > 0);
+		len -= expected - uio.uio_resid;
+	}
 	*mp = m;
 	return (0);
 }
@@ -629,7 +669,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 	int error;
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
-	error = nbd_conn_recv_mbuf(nc, sizeof(reply), &m);
+	error = nbd_conn_recv_mbufs(nc, sizeof(reply), &m);
 	if (error != 0)
 		return;
 	G_NBD_DEBUG(G_NBD_DEBUG0, "%s received reply", __func__);
@@ -660,7 +700,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	if (bp->bio_cmd == BIO_READ) {
-		error = nbd_conn_recv_mbuf(nc, bp->bio_length, &m);
+		error = nbd_conn_recv_mbufs(nc, bp->bio_length, &m);
 		if (error != 0) {
 			nbd_inflight_deliver(ni, error);
 			return;
@@ -756,6 +796,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	int error;
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+retry:
 	m = nbd_request_mbuf(nc->nc_softc->sc_tls, &req);
 	if (m == NULL) {
 		atomic_store_int(&nc->nc_state,
@@ -777,15 +818,26 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 		so->so_snd.sb_lowat = needed;
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
-			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more space",
+			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
 			    __func__);
-			sbreserve_locked(so, SO_SND, needed, curthread);
+			G_NBD_DEBUG(G_NBD_DEBUG0,
+			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
+			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
+			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
+			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
+			if (!sbreserve_locked(so, SO_SND, needed, curthread))
+				G_NBD_DEBUG(G_NBD_WARN, "sbreserve failed");
 			so->so_snd.sb_flags |= SB_AUTOSIZE;
+			continue;
 		}
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
+	if (error == EWOULDBLOCK) {
+		G_NBD_DEBUG(G_NBD_WARN, "%s sosend would block", __func__);
+		goto retry;
+	}
 	if (error != 0) {
 		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
 		    error);
