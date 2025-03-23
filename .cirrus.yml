@@ -39,6 +39,8 @@ task:
     - eval make ${DEBUG_ARGS} clean
     - eval make ${DEBUG_ARGS}
     - eval make ${DEBUG_ARGS} install
+  manlint_script:
+    - make manlint
   load_script:
     - gnbd load
   ca_info_file:
