@@ -28,6 +28,15 @@ no external dependencies.
 
 The base system OpenSSL is used for TLS support.
 
+For TLS connections, ktls(4) must be enabled:
+
+```
+# sysctl kern.ipc.tls.enable=1
+kern.ipc.tls.enable: 0 -> 1
+```
+
+ktls(4) is enabled by default on 15.0-CURRENT.
+
 ## Building and Installing
 
 To build and install for a production kernel:
