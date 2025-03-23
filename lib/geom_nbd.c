@@ -197,11 +197,16 @@ nbd_client_tls_init(struct nbd_client *client)
 static int
 nbd_client_connect(struct nbd_client *client)
 {
+	struct addrinfo hints, *first_ai, *ai;
 	struct gctl_req *req = client->req;
-	struct addrinfo *first_ai, *ai;
+	const char *what;
 	int s, on, error;
 
-	error = getaddrinfo(client->host, client->port, NULL, &first_ai);
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
+	error = getaddrinfo(client->host, client->port, &hints, &first_ai);
 	if (error != 0) {
 		gctl_error(req, "Failed to locate server (%s:%s): %s",
 		    client->host, client->port, gai_strerror(error));
@@ -210,25 +215,35 @@ nbd_client_connect(struct nbd_client *client)
 	on = 1;
 	for (ai = first_ai; ai != NULL; ai = ai->ai_next) {
 		s = socket(ai->ai_family, SOCK_STREAM, IPPROTO_TCP);
-		if (s == -1)
+		if (s == -1) {
+			what = "socket";
+			error = errno;
 			continue;
+		}
 		if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on))
-		    == -1)
+		    == -1) {
+			what = "TCP_NODELAY";
 			goto close;
+		}
 		if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on))
-		    == -1)
+		    == -1) {
+			what = "SO_KEEPALIVE";
 			goto close;
-		if (connect(s, ai->ai_addr, sizeof(*ai->ai_addr)) == -1)
+		}
+		if (connect(s, ai->ai_addr, sizeof(*ai->ai_addr)) == -1) {
+			what = "connect";
 			goto close;
+		}
 		break;
 close:
+		error = errno;
 		close(s);
 		s = -1;
 	}
 	if (s == -1) {
 		freeaddrinfo(first_ai);
-		gctl_error(req, "Failed to create socket: %s",
-		    strerror(errno));
+		gctl_error(req, "Failed to create socket: %s: %s",
+		    what, strerror(error));
 		return (-1);
 	}
 	client->socket = s;
