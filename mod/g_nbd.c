@@ -21,6 +21,7 @@
 #include <sys/sbuf.h>
 #include <sys/sched.h>
 #include <sys/sema.h>
+#include <sys/sockbuf.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sx.h>
@@ -440,6 +441,11 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			return;
 		}
 		so->so_snd.sb_lowat = needed;
+		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
+			/* XXX: how did we get here? what if this fails? */
+			sbreserve_locked(so, SO_SND, needed, curthread);
+			so->so_snd.sb_flags |= SB_AUTOSIZE;
+		}
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
@@ -547,14 +553,19 @@ nbd_conn_recv_mbuf(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	memset(&uio, 0, sizeof(uio));
 	uio.uio_resid = len;
 	SOCK_RECVBUF_LOCK(so);
-	while (sbavail(&so->so_rcv) < uio.uio_resid) {
+	while (sbavail(&so->so_rcv) < len) {
 		if (!nbd_conn_recv_ok(nc, NULL)) {
 			SOCK_RECVBUF_UNLOCK(so);
 			G_NBD_DEBUG(2, "%s disconnecting", __func__);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 			return (ENXIO);
 		}
-		so->so_rcv.sb_lowat = uio.uio_resid;
+		so->so_rcv.sb_lowat = len;
+		if (so->so_rcv.sb_lowat > so->so_rcv.sb_hiwat) {
+			/* XXX: how did we get here? what if this fails? */
+			sbreserve_locked(so, SO_RCV, len, curthread);
+			so->so_rcv.sb_flags |= SB_AUTOSIZE;
+		}
 		sbwait(so, SO_RCV);
 	}
 	SOCK_RECVBUF_UNLOCK(so);
@@ -740,8 +751,11 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 			return;
 		}
 		so->so_snd.sb_lowat = needed;
-		if (sbused(&so->so_snd) == 0)
-			break;
+		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
+			/* XXX: how did we get here? what if this fails? */
+			sbreserve_locked(so, SO_SND, needed, curthread);
+			so->so_snd.sb_flags |= SB_AUTOSIZE;
+		}
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
