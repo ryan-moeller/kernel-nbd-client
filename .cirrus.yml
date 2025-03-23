@@ -18,6 +18,7 @@ task:
       env:
         ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
   name: ${ARCHIVES_PATH}
+  stateful: false
   env:
     WD: /tmp/wd
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
