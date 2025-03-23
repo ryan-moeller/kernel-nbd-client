@@ -173,7 +173,7 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 {
 	struct nbd_inflight *ni;
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
+	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s cookie=%lu", __func__, nc->nc_seq);
 	ni = uma_zalloc(g_nbd_inflight_zone, M_NOWAIT | M_ZERO);
 	if (ni == NULL)
 		return (NULL);
