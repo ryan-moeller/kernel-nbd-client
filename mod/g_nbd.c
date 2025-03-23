@@ -996,7 +996,7 @@ nbd_conn_sender(void *arg)
 	nbd_conn_close(nc);
 	if (g_nbd_remove_conn(sc, nc)) {
 		G_NBD_DEBUG(G_NBD_INFO, "%s last connection closed", __func__);
-		g_error_provider(sc->sc_provider, ENXIO);
+		g_wither_provider(sc->sc_provider, ENXIO);
 		/* TODO: option to save the queue for a rescue operation */
 		g_nbd_drain_queue(sc);
 		g_nbd_free(sc);
