@@ -383,7 +383,7 @@ frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff8000b04640
 socket[
   options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
   snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
-  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT,0xffffffffffff0000>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
 ]
 (nbd_inflight) *tqh_first = {
   ni_bio = 0xfffff805cf00c900
@@ -404,7 +404,7 @@ frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003550e0
 socket[
   options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
   snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
-  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT,0xffffffffffff0000>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
 ]
 (lldb)
 ```
