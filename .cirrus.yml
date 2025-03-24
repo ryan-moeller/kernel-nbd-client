@@ -68,13 +68,6 @@ task:
       tls_www_client
       encryption_key
       signing_key
-  nbdconfig_file:
-    path: ${WD}/nbdconfig
-    from_contents: |
-      [generic]
-      cacertfile = ${WD}/cacert.pem
-      certfile = ${WD}/servercert.pem
-      keyfile = ${WD}/serverkey.pem
   test_setup_script:
     - pkg install -y
       autoconf-archive
@@ -115,10 +108,25 @@ task:
     # Make a memory disk to serve.
     - mdconfig -a -t swap -s 4g
       | xargs -I @ echo MD=@ | tee -a ${CIRRUS_ENV} >&2
+  # Environment variables added by scripts aren't picked up by file
+  # instructions, so we have to create the file in a script instead.
+  test_server_config_script: |
+    cat >> ${WD}/nbdconfig <<EOF
+    [generic]
+    listenaddr = localhost
+    cacertfile = ${WD}/cacert.pem
+    certfile = ${WD}/servercert.pem
+    keyfile = ${WD}/serverkey.pem
+
+    [${MD}]
+    exportname = /dev/${MD}
+    flush = true
+    trim = true
+    EOF
   test_server_background_script:
-    - ${WD}/nbd/nbd-server 10809 /dev/${MD} -C ${WD}/nbdconfig
+    - ${WD}/nbd/nbd-server -C ${WD}/nbdconfig
   test_connect_notls_script:
-    - gnbd connect localhost
+    - gnbd connect -n ${MD} localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   test_notls_script:
     # Test with 1 connection.
@@ -146,7 +154,7 @@ task:
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   test_connect_tls_script:
     - sysctl kern.ipc.tls.enable=1
-    - gnbd connect
+    - gnbd connect -n ${MD}
       -A ${WD}/cacert.pem
       -C ${WD}/clientcert.pem
       -K ${WD}/clientkey.pem
