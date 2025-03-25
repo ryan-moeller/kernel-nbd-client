@@ -626,7 +626,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
 			if (error == EAGAIN) {
 				G_NBD_DEBUG(G_NBD_DEBUG0,
-				    "len=%zd avail=%zd expected=%zd resid=%zd",
+				    "len=%zu avail=%zu expected=%zu resid=%zd",
 				    len, available, expected, uio.uio_resid);
 				break;
 			}
@@ -1191,14 +1191,14 @@ g_nbd_ctl_setup_socket(struct gctl_req *req, struct socket *so, size_t maxsz)
 
 	minspace = sizeof(struct nbd_request) + maxsz;
 	if (sendspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace -> %zd",
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace -> %zu",
 		    minspace);
 		sendspace = minspace;
 	}
 	/* TODO: support structured replies */
 	minspace = sizeof(struct nbd_simple_reply) + maxsz;
 	if (recvspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace -> %zd",
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace -> %zu",
 		    minspace);
 		recvspace = minspace;
 	}
