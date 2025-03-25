@@ -41,6 +41,8 @@ task:
     - eval make ${DEBUG_ARGS} install
   manlint_script:
     - make manlint
+  messages_background_script:
+    - tail -F /var/log/messages
   load_script:
     - gnbd load
   ca_info_file:
