@@ -1,5 +1,5 @@
 freebsd_instance:
-  cpu: 8
+  cpu: 4
   memory: 8G
 
 task:
