@@ -414,3 +414,62 @@ in the invocation of `make` for the lldb script to work.  Then when loaded by
 `make load` from the mod/ directory without being installed, the symbols will be
 automatically found by lldb.  Otherwise when installing, DEBUG_FLAGS must also
 be set in the invocation of `make install` for debug symbols to be installed.
+
+## Performance Metrics
+
+Profiles are collected for a selection of synthetic workloads as part of the CI
+testing.  Each trace is of fio running with the [ci.fio](ci.fio) job file and
+iodepth and bs from the table below on an NBD device with 4 connections.
+
+The latest results can be found below:
+
+| FreeBSD Version | TLS | IO Depth | Blocksize | Fio JSON+  | Collapsed Stacks | Flame Graph | Speedscope |
+| --------------- | --- | -------- | --------- | ---------- | ---------------- | ----------- | ---------- |
+| 14.2-RELEASE    | no  | 32       | 4k        | [json][1a] | [txt][1b]        | [svg][1c]   | [🔬][1d]   |
+| 14.2-RELEASE    | no  | 4        | 1m        | [json][2a] | [txt][2b]        | [svg][2c]   | [🔬][2d]   |
+| 14.2-RELEASE    | yes | 32       | 4k        | [json][3a] | [txt][3b]        | [svg][3c]   | [🔬][3d]   |
+| 14.2-RELEASE    | yes | 4        | 1m        | [json][4a] | [txt][4b]        | [svg][4c]   | [🔬][4d]   |
+| 15.0-CURRENT    | no  | 32       | 4k        | [json][5a] | [txt][5b]        | [svg][5c]   | [🔬][5d]   |
+| 15.0-CURRENT    | no  | 4        | 1m        | [json][6a] | [txt][6b]        | [svg][6c]   | [🔬][6d]   |
+| 15.0-CURRENT    | yes | 32       | 4k        | [json][7a] | [txt][7b]        | [svg][7c]   | [🔬][7d]   |
+| 15.0-CURRENT    | yes | 4        | 1m        | [json][8a] | [txt][8b]        | [svg][8c]   | [🔬][8d]   |
+
+[1a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/fio/traces/notls-32-4k.fio.json
+[1b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/trace/traces/notls-32-4k.collapsedstack.txt
+[1c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/svg/traces/notls-32-4k.svg
+[1d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Freleases%252Famd64%252F14.2-RELEASE%2Ftrace%2Ftraces%2Fnotls-32-4k.collapsedstack.txt&title=FreeBSD+14.2-RELEASE+notls-32-4k
+
+[2a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/fio/traces/notls-4-1m.fio.json
+[2b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/trace/traces/notls-4-1m.collapsedstack.txt
+[2c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/svg/traces/notls-4-1m.svg
+[2d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Freleases%252Famd64%252F14.2-RELEASE%2Ftrace%2Ftraces%2Fnotls-4-1m.collapsedstack.txt&title=FreeBSD+14.2-RELEASE+notls-4-1m
+
+[3a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/fio/traces/tls-32-4k.fio.json
+[3b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/trace/traces/tls-32-4k.collapsedstack.txt
+[3c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/svg/traces/tls-32-4k.svg
+[3d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Freleases%252Famd64%252F14.2-RELEASE%2Ftrace%2Ftraces%2Ftls-32-4k.collapsedstack.txt&title=FreeBSD+14.2-RELEASE+tls-32-4k
+
+[4a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/fio/traces/tls-4-1m.fio.json
+[4b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/trace/traces/tls-4-1m.collapsedstack.txt
+[4c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/releases%2Famd64%2F14.2-RELEASE/svg/traces/tls-4-1m.svg
+[4d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Freleases%252Famd64%252F14.2-RELEASE%2Ftrace%2Ftraces%2Ftls-4-1m.collapsedstack.txt&title=FreeBSD+14.2-RELEASE+tls-4-1m
+
+[5a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/fio/traces/notls-32-4k.fio.json
+[5b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/trace/traces/notls-32-4k.collapsedstack.txt
+[5c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/svg/traces/notls-32-4k.svg
+[5d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Fsnapshots%252Famd64%252F15.0-CURRENT%2Ftrace%2Ftraces%2Fnotls-32-4k.collapsedstack.txt&title=FreeBSD+15.0-CURRENT+notls-32-4k
+
+[6a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/fio/traces/notls-4-1m.fio.json
+[6b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/trace/traces/notls-4-1m.collapsedstack.txt
+[6c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/svg/traces/notls-4-1m.svg
+[6d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Fsnapshots%252Famd64%252F15.0-CURRENT%2Ftrace%2Ftraces%2Fnotls-4-1m.collapsedstack.txt&title=FreeBSD+15.0-CURRENT+notls-4-1m
+
+[7a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/fio/traces/tls-32-4k.fio.json
+[7b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/trace/traces/tls-32-4k.collapsedstack.txt
+[7c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/svg/traces/tls-32-4k.svg
+[7d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Fsnapshots%252Famd64%252F15.0-CURRENT%2Ftrace%2Ftraces%2Ftls-32-4k.collapsedstack.txt&title=FreeBSD+15.0-CURRENT+tls-32-4k
+
+[8a]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/fio/traces/tls-4-1m.fio.json
+[8b]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/trace/traces/tls-4-1m.collapsedstack.txt
+[8c]: https://api.cirrus-ci.com/v1/artifact/github/ryan-moeller/kernel-nbd-client/snapshots%2Famd64%2F15.0-CURRENT/svg/traces/tls-4-1m.svg
+[8d]: https://speedscope.app#profileURL=https%3A%2F%2Fapi.cirrus-ci.com%2Fv1%2Fartifact%2Fgithub%2Fryan-moeller%2Fkernel-nbd-client%2Fsnapshots%252Famd64%252F15.0-CURRENT%2Ftrace%2Ftraces%2Ftls-4-1m.collapsedstack.txt&title=FreeBSD+15.0-CURRENT+tls-4-1m
