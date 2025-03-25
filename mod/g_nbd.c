@@ -1049,6 +1049,7 @@ nbd_conn_sender(void *arg)
 	if (g_nbd_remove_conn(sc, nc)) {
 		G_NBD_DEBUG(G_NBD_INFO, "%s last connection closed", __func__);
 		g_wither_provider(sc->sc_provider, ENXIO);
+		/* TODO: wait for access count to reach 0 */
 		/* TODO: option to save the queue for a rescue operation */
 		g_nbd_drain_queue(sc);
 		g_nbd_free(sc);
@@ -1237,7 +1238,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct g_geom *gp;
 	struct g_provider *pp;
 	intmax_t *cp;
-	size_t maxsz;
+	size_t limit, maxsz;
 	int unit, nsockets;
 
 	g_topology_assert();
@@ -1323,9 +1324,12 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	maxsz = *maxpayloadp;
-	if (maxsz > maxpayload) {
-		G_NBD_DEBUG(1, "limiting max payload size to %d", maxpayload);
-		maxsz = maxpayload;
+	limit = maxpayload;
+	if (*tlsp && limit > g_nbd_tlsmax)
+		limit = g_nbd_tlsmax;
+	if (maxsz > limit) {
+		G_NBD_DEBUG(1, "limiting max payload size to %zu", limit);
+		maxsz = limit;
 	}
 	if (*minbsp > maxsz) {
 		g_destroy_geom(gp);
