@@ -7,6 +7,7 @@
 #include <sys/param.h>
 #include <sys/bio.h>
 #include <sys/capsicum.h>
+#include <sys/condvar.h>
 #include <sys/file.h>
 #include <sys/kthread.h>
 #include <sys/limits.h>
@@ -19,6 +20,7 @@
 #include <sys/protosw.h>
 #include <sys/queue.h>
 #include <sys/refcount.h>
+#include <sys/resourcevar.h>
 #include <sys/sbuf.h>
 #include <sys/sched.h>
 #include <sys/sema.h>
@@ -36,6 +38,7 @@
 #include <machine/atomic.h>
 
 #include <vm/uma.h>
+#include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
 #include "g_nbd.h"
@@ -49,14 +52,14 @@ static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
 static int g_nbd_debug = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
     "Debug level");
-static int maxpayload = 256 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
-    "Maximum payload size");
-static int sendspace = 1536 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
+static uint32_t maxpayload = 1 << 25;
+SYSCTL_U32(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
+    "Default maximum payload size");
+static u_long sendspace = 1536 * 1024;
+SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
     "Default socket send buffer size");
-static int recvspace = 1536 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
+static u_long recvspace = 1536 * 1024;
+SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
     "Default socket receive buffer size");
 static int identfmt = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, identfmt, CTLFLAG_RWTUN, &identfmt, 0,
@@ -74,23 +77,6 @@ enum {
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
 #define G_NBD_LOGREQ(lvl, bp, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), (bp), __VA_ARGS__)
-
-#define PRINT_SB_FLAGS "\20" \
-    "\20TLS_RX_RESYNC" \
-    "\17SPLICED" \
-    "\16AIO_RUNNING" \
-    "\15STOP" \
-    "\14AUTOSIZE" \
-    "\13IN_TOE" \
-    "\12NOCOALESCE" \
-    "\11KNOTE" \
-    "\10AIO" \
-    "\6UPCALL" \
-    "\5ASYNC" \
-    "\4SEL" \
-    "\3WAIT" \
-    "\2TLS_RX_RUNNING" \
-    "\1TLS_RX"
 
 struct g_nbd_softc;
 
@@ -115,6 +101,8 @@ struct nbd_conn {
 	uint64_t		nc_seq;
 	TAILQ_HEAD(, nbd_inflight)	nc_inflight;
 	struct mtx		nc_inflight_mtx;
+	struct cv		nc_send_cv;
+	struct cv		nc_receive_cv;
 	struct sema		nc_receiver_done;
 	SLIST_ENTRY(nbd_conn)	nc_connections;
 };
@@ -288,8 +276,6 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 {
 	struct socket *so = nc->nc_socket;
 
-	SOCK_SENDBUF_LOCK_ASSERT(so);
-
 	if (atomic_load_int(&nc->nc_state) != NBD_CONN_CONNECTED) {
 		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
@@ -336,6 +322,125 @@ nbd_request_mbuf(bool tls, struct nbd_request **reqp)
 	return (m);
 }
 
+static struct mbuf *
+nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
+{
+	struct bio *bp = ni->ni_bio;
+	vm_ooffset_t start = *offset;
+	struct mbuf *m;
+
+	KASSERT(limit > 0, ("%s limit is zero", __func__));
+	KASSERT(start < bp->bio_length, ("%s offset %zu out of bounds",
+	    __func__, start));
+
+	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s %s limit=%zu *offset=%zu", __func__,
+	      tls ? "tls" : "notls", limit, start);
+	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+		struct mbuf *d, *m_tail;
+		size_t page_offset = start == 0 ? bp->bio_ma_offset : 0;
+		size_t resid = bp->bio_length;
+		size_t len;
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped write (%s)",
+		    __func__, tls ? "tls" : "notls");
+		if (resid > limit)
+			/* Reduce limit to end on a page boundary. */
+			resid = trunc_page(limit - page_offset) + page_offset;
+		*offset += resid;
+		m = m_tail = d = NULL;
+		for (int i = OFF_TO_IDX(start + page_offset);
+		    resid > 0; i++) {
+			if (d == NULL) {
+				d = mb_alloc_ext_pgs(M_NOWAIT,
+#if __FreeBSD_version > 1500026
+				    nbd_inflight_free_mext, M_RDONLY);
+#else
+				    nbd_inflight_free_mext);
+#endif
+				if (d == NULL) {
+					m_freem(m);
+					return (NULL);
+				}
+				refcount_acquire(&ni->ni_refs);
+				d->m_ext.ext_arg1 = ni;
+				d->m_epg_1st_off = page_offset;
+				if (m == NULL)
+					m = d;
+			}
+			len = MIN(resid, PAGE_SIZE - page_offset);
+			MPASS(i < bp->bio_ma_n);
+			d->m_epg_pa[d->m_epg_npgs++] =
+			    VM_PAGE_TO_PHYS(bp->bio_ma[i]);
+			d->m_epg_last_len = len;
+			d->m_len += len;
+			d->m_ext.ext_size += PAGE_SIZE;
+			MBUF_EXT_PGS_ASSERT_SANITY(d);
+			if (d->m_epg_npgs == MBUF_PEXT_MAX_PGS || (tls &&
+			    d->m_epg_npgs == (g_nbd_tlsmax >> PAGE_SHIFT))) {
+				if (m_tail != NULL)
+					m_tail->m_next = d;
+				m_tail = d;
+				d = NULL;
+			}
+			page_offset = 0;
+			resid -= len;
+		}
+		if (m_tail != NULL)
+			m_tail->m_next = d;
+	} else if (tls) {
+		struct mbuf *d, *m_tail;
+		off_t start = *offset;
+		c_caddr_t data = bp->bio_data + start;
+		size_t resid = bp->bio_length - start;
+		size_t len;
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (tls)",
+		    __func__);
+		if (resid > limit)
+			/* Reduce limit to end on a page boundary. */
+			resid = trunc_page(limit);
+		*offset += resid;
+		m = NULL;
+		while (resid > 0) {
+			len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
+			len = MIN(len, g_nbd_tlsmax);
+			d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
+			if (d == NULL) {
+				m_freem(m);
+				return (NULL);
+			}
+			d->m_len = len;
+			d->m_ext.ext_size = d->m_epg_npgs * PAGE_SIZE;
+			d->m_epg_last_len =
+			    PAGE_SIZE - (d->m_ext.ext_size - len);
+			MBUF_EXT_PGS_ASSERT_SANITY(d);
+			m_copyback(d, 0, len, data);
+			if (m == NULL)
+				m = m_tail = d;
+			else {
+				m_tail->m_next = d;
+				m_tail = d;
+			}
+			data += len;
+			resid -= len;
+		}
+	} else {
+		size_t len = MIN(bp->bio_length - start, limit);
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (notls)",
+		    __func__);
+		m = m_get(M_NOWAIT, MT_DATA);
+		if (m == NULL)
+			return (NULL);
+		refcount_acquire(&ni->ni_refs);
+		m_extadd(m, bp->bio_data + start, len, nbd_inflight_free_mext,
+		    ni, NULL, M_RDONLY, EXT_MOD_TYPE);
+		m->m_len = len;
+		*offset += len;
+	}
+	return (m);
+}
+
 static void
 nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
@@ -343,7 +448,8 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	struct bio *bp = ni->ni_bio;
 	struct nbd_request *req;
 	struct mbuf *m;
-	size_t needed;
+	size_t offset, resid;
+	long needed, wanted; /* must be signed */
 	uint16_t flags = 0; /* no command flags supported currently */
 	int16_t cmd = bio_to_nbd_cmd(bp);
 	int error;
@@ -353,7 +459,6 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	    bio_cmd_str(bp), bp->bio_cmd));
 
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
-retry:
 	m = nbd_request_mbuf(tls, &req);
 	if (m == NULL) {
 		nbd_conn_remove_inflight_specific(nc, ni);
@@ -366,153 +471,72 @@ retry:
 	req->cookie = htobe64(ni->ni_cookie);
 	req->offset = htobe64(bp->bio_offset);
 	req->length = htobe32(bp->bio_length);
-	needed = sizeof(*req);
-	if (cmd == NBD_CMD_WRITE) {
-		struct mbuf *d;
+	needed = resid = sizeof(*req);
+	if (cmd == NBD_CMD_WRITE)
+		resid += bp->bio_length;
+	offset = 0;
+	do {
+		if (cmd == NBD_CMD_WRITE) {
+			size_t limit = so->so_snd.sb_hiwat - needed;
+			size_t prev_offset = offset;
+			struct mbuf *d;
 
-		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
-			struct mbuf *m_tail = m;
-			size_t page_offset = bp->bio_ma_offset;
-			size_t resid = bp->bio_length;
-			size_t len;
-
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped write",
-			    __func__);
-			d = NULL;
-			for (int i = 0; resid > 0; i++) {
-				if (d == NULL) {
-					d = mb_alloc_ext_pgs(M_NOWAIT,
-#if __FreeBSD_version > 1500026
-					    nbd_inflight_free_mext, M_RDONLY);
-#else
-					    nbd_inflight_free_mext);
-#endif
-					if (d == NULL) {
-						m_freem(m);
-						nbd_conn_remove_inflight_specific(
-						    nc, ni);
-						nbd_inflight_deliver(ni,
-						    ENOMEM);
-						return;
-					}
-					refcount_acquire(&ni->ni_refs);
-					d->m_ext.ext_arg1 = ni;
-					d->m_epg_1st_off = page_offset;
-				}
-				len = MIN(resid, PAGE_SIZE - page_offset);
-				d->m_epg_pa[d->m_epg_npgs++] =
-				    VM_PAGE_TO_PHYS(bp->bio_ma[i]);
-				d->m_epg_last_len = len;
-				d->m_len += len;
-				d->m_ext.ext_size += PAGE_SIZE;
-				MBUF_EXT_PGS_ASSERT_SANITY(d);
-				if (d->m_epg_npgs == MBUF_PEXT_MAX_PGS) {
-					m_tail->m_next = d;
-					m_tail = d;
-					needed += d->m_len;
-					d = NULL;
-				}
-				page_offset = 0;
-				resid -= len;
-			}
-			if (d != NULL) {
-				m_tail->m_next = d;
-				needed += d->m_len;
-			}
-		} else if (tls) {
-			struct mbuf *m_tail = m;
-			c_caddr_t data = bp->bio_data;
-			size_t resid = bp->bio_length;
-			size_t len;
-
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (tls)",
-			    __func__);
-			needed += resid;
-			while (resid > 0) {
-				len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
-				d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
-				if (d == NULL) {
-					m_free(m);
-					nbd_conn_remove_inflight_specific(nc,
-					    ni);
-					nbd_inflight_deliver(ni, ENOMEM);
-					return;
-				}
-				d->m_len = len;
-				d->m_ext.ext_size = d->m_epg_npgs * PAGE_SIZE;
-				d->m_epg_last_len =
-				    PAGE_SIZE - (d->m_ext.ext_size - len);
-				MBUF_EXT_PGS_ASSERT_SANITY(d);
-				m_copyback(d, 0, len, data);
-				m_tail->m_next = d;
-				m_tail = d;
-				data += len;
-				resid -= len;
-			}
-		} else {
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write",
-			    __func__);
-			d = m_get(M_NOWAIT, MT_DATA);
+			d = nbd_write_mbufs(ni, tls, limit, &offset);
 			if (d == NULL) {
 				m_free(m);
 				nbd_conn_remove_inflight_specific(nc, ni);
 				nbd_inflight_deliver(ni, ENOMEM);
 				return;
 			}
-			refcount_acquire(&ni->ni_refs);
-			m_extadd(d, bp->bio_data, bp->bio_length,
-			    nbd_inflight_free_mext, ni, NULL, M_RDONLY,
-			    EXT_MOD_TYPE);
-			d->m_len = bp->bio_length;
-			needed += d->m_len;
-			m->m_next = d;
+			if (m == NULL)
+				m = d;
+			else
+				m->m_next = d;
+			needed += offset - prev_offset;
 		}
-	}
-	SOCK_SENDBUF_LOCK(so);
-	so->so_snd.sb_lowat = MAX(needed, so->so_snd.sb_hiwat / 8);
-	while (!sowriteable(so)) {
-		if (!nbd_conn_send_ok(nc, bp)) {
-			SOCK_SENDBUF_UNLOCK(so);
-			G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
-			    __func__);
+		MPASS(m != NULL);
+		MPASS(needed == m_length(m, NULL));
+		SOCK_SENDBUF_LOCK(so);
+		for (;;) {
+			if (!nbd_conn_send_ok(nc, bp)) {
+				SOCK_SENDBUF_UNLOCK(so);
+				G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
+				    __func__);
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
+				m_freem(m);
+				nbd_conn_remove_inflight_specific(nc, ni);
+				nbd_inflight_deliver(ni, ENXIO);
+				return;
+			}
+			if (sbspace(&so->so_snd) >= needed)
+				break;
+			/*
+			 * Potentially wait for more space than we need, to
+			 * reduce how frequently we sleep in exchange for how
+			 * long we sleep.  This can also reduce contention for
+			 * the sendbuf lock.
+			 */
+			wanted = MAX(needed, so->so_snd.sb_hiwat / 8);
+			MPASS(wanted <= so->so_snd.sb_hiwat);
+			so->so_snd.sb_lowat = wanted;
+			cv_wait(&nc->nc_send_cv, SOCK_SENDBUF_MTX(so));
+			so->so_snd.sb_lowat = so->so_snd.sb_hiwat + 1;
+		}
+		SOCK_SENDBUF_UNLOCK(so);
+		error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
+		if (error != 0) {
+			G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)",
+			    __func__, error);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-			m_freem(m);
 			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENXIO);
+			nbd_inflight_deliver(ni, error);
 			return;
 		}
-		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
-			/* XXX: how did we get here? what if this fails? */
-			G_NBD_LOGREQ(G_NBD_WARN, bp,
-			    "%s reserving more snd space", __func__);
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
-			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
-			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
-			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
-			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
-			if (!sbreserve_locked(so, SO_SND, needed, curthread))
-				G_NBD_LOGREQ(G_NBD_WARN, bp,
-				    "sbreserve failed");
-			so->so_snd.sb_flags |= SB_AUTOSIZE;
-			continue;
-		}
-		sbwait(so, SO_SND);
-	}
-	SOCK_SENDBUF_UNLOCK(so);
-	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
-	if (error == EWOULDBLOCK) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s sosend would block", __func__);
-		goto retry;
-	}
-	if (error != 0) {
-		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)", __func__,
-		    error);
-		if (error != ENOMEM && error != EINTR && error != ERESTART)
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-		nbd_conn_remove_inflight_specific(nc, ni);
-		nbd_inflight_deliver(ni, error);
-		return;
-	}
+		resid -= needed;
+		needed = 0;
+		m = NULL;
+	} while (resid > 0);
 }
 
 static inline void
@@ -545,23 +569,21 @@ nbd_error_to_errno(uint32_t error)
 }
 
 static inline bool
-nbd_conn_recv_ok(struct nbd_conn *nc, struct bio *bp)
+nbd_conn_recv_ok(struct nbd_conn *nc)
 {
 	struct socket *so = nc->nc_socket;
 
-	SOCK_RECVBUF_LOCK_ASSERT(so);
-
 	if (atomic_load_int(&nc->nc_state) == NBD_CONN_HARD_DISCONNECTING) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "nc_state=%s",
+		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
 		return (false);
 	}
 	if (so->so_error != 0) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp, "so_error=%d", so->so_error);
+		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
 		return (false);
 	}
-	if ((so->so_rcv.sb_state & SBS_CANTRCVMORE) != 0) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot receive more");
+	if (so->so_rerror != 0) {
+		G_NBD_DEBUG(G_NBD_WARN, "so_rerror=%d", so->so_rerror);
 		return (false);
 	}
 	return (true);
@@ -603,7 +625,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 {
 	struct uio uio;
 	struct socket *so = nc->nc_socket;
-	struct mbuf *m, *m_tail;
+	struct mbuf *m, *m_tail, *m1;
 	size_t available, expected;
 	int flags, error;
 
@@ -611,55 +633,83 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	m = NULL;
 	while (len > 0) {
 		SOCK_RECVBUF_LOCK(so);
-		if (!nbd_conn_recv_ok(nc, NULL)) {
-			SOCK_RECVBUF_UNLOCK(so);
-			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-			m_freem(m);
-			return (ENXIO);
-		}
-		available = sbavail(&so->so_rcv);
-		if (available < len) {
-			so->so_rcv.sb_lowat = len;
-			sbwait(so, SO_RCV);
-			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
+		for (;;) {
+			if (!nbd_conn_recv_ok(nc)) {
+				SOCK_RECVBUF_UNLOCK(so);
+				G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting",
+				    __func__);
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
+				m_freem(m);
+				return (ENXIO);
+			}
 			available = sbavail(&so->so_rcv);
+			if (available >= len)
+				break;
+			/*
+			 * XXX: We may have to receive with sbavail() < len if
+			 * mb efficiency is very bad.  For example, GCE images
+			 * have mtu 1460 on lo0 by default, causing the loopback
+			 * interface to pass traffic in JUMBOP mbufs but
+			 * utilizing less than half of the space.  With large
+			 * buffers, we do not get the safety net of
+			 * sb_efficiency making mbmax 8x hiwat, so we can be out
+			 * of buffer space and unable to receive more while
+			 * being under the low water mark.
+			 *
+			 * Check if we are out of space here to avoid blocking
+			 * the receive thread indefinitely.  It's possible all
+			 * space is used by encrypted TLS records and none is
+			 * available yet.  If so, we still need to wait for data
+			 * to become available.
+			 */
+			if (available > 0 && sbspace(&so->so_rcv) <= 0)
+				break;
+			/*
+			 * XXX: We may have a complete TLS record in the receive
+			 * buffer and not enough space for the next record.  Get
+			 * it out of the way.
+			 */
+			if (so->so_rcv.sb_mbtail != NULL &&
+			    (so->so_rcv.sb_mbtail->m_flags & M_EOR) != 0)
+				break;
+			so->so_rcv.sb_lowat = MIN(len, so->so_rcv.sb_hiwat);
+			cv_wait(&nc->nc_receive_cv, SOCK_RECVBUF_MTX(so));
+			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
 		}
 		SOCK_RECVBUF_UNLOCK(so);
-		if (available == 0)
-			continue;
+		MPASS(available > 0);
 		memset(&uio, 0, sizeof(uio));
 		uio.uio_resid = expected = MIN(len, available);
-		while (uio.uio_resid > 0) {
-			struct mbuf *m1;
-
-			flags = MSG_DONTWAIT;
-			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
-			if (error == EAGAIN) {
-				G_NBD_DEBUG(G_NBD_DEBUG0,
-				    "len=%zu avail=%zu expected=%zu resid=%zd",
-				    len, available, expected, uio.uio_resid);
-				break;
-			}
-			if (error != 0) {
-				G_NBD_DEBUG(G_NBD_ERROR,
-				    "%s soreceive failed (%d)", __func__,
-				    error);
-				if (error != ENOMEM && error != EINTR &&
-				    error != ERESTART)
-					nbd_conn_degrade_state(nc,
-					    NBD_CONN_HARD_DISCONNECTING);
-				m_freem(m);
-				return (error);
-			}
-			if (m == NULL)
-				m = m_tail = m1;
-			else {
-				while (m_tail->m_next != NULL)
-					m_tail = m_tail->m_next;
-				m_tail->m_next = m1;
-				m_tail = m1;
-			}
+		/*
+		 * XXX: With MSG_TLSAPPDATA, soreceive() will return
+		 * ENXIO when a TLS alert record is received.  This
+		 * would have to be decoded by userland.  We will
+		 * treat it as a fatal error, which it probably is.
+		 * The details of the error will be lost, as we do not
+		 * have a userland daemon to understand it.
+		 */
+		flags = MSG_DONTWAIT | MSG_TLSAPPDATA;
+		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
+		if (error != 0) {
+			G_NBD_DEBUG(G_NBD_ERROR,
+			    "%s soreceive failed (%d)", __func__,
+			    error);
+			nbd_conn_degrade_state(nc,
+			    NBD_CONN_HARD_DISCONNECTING);
+			if (error == ENOMEM)
+				counter_u64_add(g_nbd_enomems, 1);
+			m_freem(m);
+			return (error);
+		}
+		MPASS(m1 != NULL);
+		if (m == NULL)
+			m = m_tail = m1;
+		else {
+			while (m_tail->m_next != NULL)
+				m_tail = m_tail->m_next;
+			m_tail->m_next = m1;
+			m_tail = m1;
 		}
 		len -= expected - uio.uio_resid;
 	}
@@ -709,38 +759,57 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	if (bp->bio_cmd == BIO_READ) {
-		error = nbd_conn_recv_mbufs(nc, bp->bio_length, &m);
-		if (error != 0) {
-			nbd_inflight_deliver(ni, error);
-			return;
-		}
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s received read data",
-		    __func__);
-		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
-			vm_offset_t vaddr;
-			size_t page_offset = bp->bio_ma_offset;
-			size_t resid = bp->bio_length;
-			size_t offset = 0;
-			size_t len;
+		size_t offset = 0;
+		size_t resid = bp->bio_length;
 
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped read",
-			    __func__);
-			for (int i = 0; resid > 0; i++) {
-				len = MIN(resid, PAGE_SIZE - page_offset);
-				vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(
-				    bp->bio_ma[i]));
-				m_copydata(m, offset, len, (char *)vaddr +
-				    page_offset);
-				page_offset = 0;
-				offset += len;
-				resid -= len;
+		/* Perform the read in batches to limit the memory usage. */
+		while (resid > 0) {
+			/* TODO: this could be tunable, needs profiling */
+			size_t limit = nc->nc_socket->so_rcv.sb_hiwat;
+			size_t len = resid;
+
+			if (len > limit)
+				len = trunc_page(limit);
+			error = nbd_conn_recv_mbufs(nc, len, &m);
+			if (error != 0) {
+				nbd_inflight_deliver(ni, error);
+				return;
 			}
-		} else {
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped read",
+			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s received read data",
 			    __func__);
-			m_copydata(m, 0, bp->bio_length, bp->bio_data);
+			if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+				vm_offset_t vaddr;
+				size_t page_offset =
+				    offset == 0 ? bp->bio_ma_offset : 0;
+				size_t offset1 = 0;
+				size_t resid1 = len;
+				size_t len1;
+
+				G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
+				    "%s unmapped read", __func__);
+				for (int i = OFF_TO_IDX(offset + page_offset);
+				    resid1 > 0; i++) {
+					len1 = MIN(resid1,
+					    PAGE_SIZE - page_offset);
+					MPASS(i < bp->bio_ma_n);
+					vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(
+					    bp->bio_ma[i]));
+					/* XXX: no way to avoid this copy? */
+					m_copydata(m, offset1, len1,
+					    (char *)vaddr + page_offset);
+					page_offset = 0;
+					offset1 += len1;
+					resid1 -= len1;
+				}
+			} else {
+				G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped read",
+				    __func__);
+				m_copydata(m, 0, len, bp->bio_data + offset);
+			}
+			m_freem(m);
+			offset += len;
+			resid -= len;
 		}
-		m_freem(m);
 	}
 	bp->bio_completed = bp->bio_length;
 	bp->bio_resid = 0;
@@ -779,8 +848,6 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 {
 	struct socket *so = nc->nc_socket;
 
-	SOCK_SENDBUF_LOCK_ASSERT(so);
-
 	if (atomic_load_int(&nc->nc_state) != NBD_CONN_SOFT_DISCONNECTING) {
 		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
@@ -788,6 +855,10 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 	}
 	if (so->so_error != 0) {
 		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
+		return (false);
+	}
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
+		G_NBD_DEBUG(G_NBD_DEBUG0, "not connected");
 		return (false);
 	}
 	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0) {
@@ -803,57 +874,38 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	struct socket *so = nc->nc_socket;
 	struct nbd_request *req;
 	struct mbuf *m;
-	size_t needed;
+	long needed; /* must be signed */
 	int error;
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
-retry:
 	m = nbd_request_mbuf(nc->nc_softc->sc_tls, &req);
-	if (m == NULL) {
-		atomic_store_int(&nc->nc_state,
-		    NBD_CONN_HARD_DISCONNECTING);
-		return;
-	}
+	if (m == NULL)
+		goto done;
 	memset(req, 0, sizeof(*req));
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
 	needed = sizeof(*req);
 	SOCK_SENDBUF_LOCK(so);
-	so->so_snd.sb_lowat = needed;
-	while (!sowriteable(so)) {
+	for (;;) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
 			m_free(m);
-			return;
+			goto done;
 		}
-		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
-			/* XXX: how did we get here? what if this fails? */
-			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
-			    __func__);
-			G_NBD_DEBUG(G_NBD_DEBUG0,
-			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
-			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
-			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
-			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
-			if (!sbreserve_locked(so, SO_SND, needed, curthread))
-				G_NBD_DEBUG(G_NBD_WARN, "sbreserve failed");
-			so->so_snd.sb_flags |= SB_AUTOSIZE;
-			continue;
-		}
-		sbwait(so, SO_SND);
+		if (sbspace(&so->so_snd) >= needed)
+			break;
+		MPASS(needed <= so->so_snd.sb_hiwat);
+		so->so_snd.sb_lowat = needed;
+		cv_wait(&nc->nc_send_cv, SOCK_SENDBUF_MTX(so));
+		so->so_snd.sb_lowat = so->so_snd.sb_hiwat + 1;
 	}
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
-	if (error == EWOULDBLOCK) {
-		G_NBD_DEBUG(G_NBD_WARN, "%s sosend would block", __func__);
-		goto retry;
-	}
 	if (error != 0) {
 		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
 		    error);
-		atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
-		return;
+		goto done;
 	}
 	soshutdown(so, SHUT_WR);
 	while (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
@@ -866,6 +918,7 @@ retry:
 		mtx_unlock(&nc->nc_inflight_mtx);
 		break;
 	}
+done:
 	atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 }
 
@@ -876,6 +929,12 @@ nbd_conn_close(struct nbd_conn *nc)
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
 	atomic_store_int(&nc->nc_state, NBD_CONN_CLOSED);
+	SOCK_SENDBUF_LOCK(so);
+	soupcall_clear(so, SO_SND);
+	SOCK_SENDBUF_UNLOCK(so);
+	SOCK_RECVBUF_LOCK(so);
+	soupcall_clear(so, SO_RCV);
+	SOCK_RECVBUF_UNLOCK(so);
 	soclose(so);
 }
 
@@ -941,6 +1000,8 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 	sx_xunlock(&g_nbd_lock);
 
 	sema_destroy(&nc->nc_receiver_done);
+	cv_destroy(&nc->nc_receive_cv);
+	cv_destroy(&nc->nc_send_cv);
 	mtx_destroy(&nc->nc_inflight_mtx);
 	g_free(nc);
 	return (last);
@@ -1054,13 +1115,13 @@ nbd_conn_sender(void *arg)
 	if (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING)
 		nbd_conn_soft_disconnect(nc);
 	socantrcvmore(so);
+	cv_signal(&nc->nc_receive_cv);
 	sema_wait(&nc->nc_receiver_done);
 	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
 	if (g_nbd_remove_conn(sc, nc)) {
 		G_NBD_DEBUG(G_NBD_INFO, "%s last connection closed", __func__);
 		g_wither_provider(sc->sc_provider, ENXIO);
-		/* TODO: wait for access count to reach 0 */
 		/* TODO: option to save the queue for a rescue operation */
 		g_nbd_drain_queue(sc);
 		g_nbd_free(sc);
@@ -1084,9 +1145,54 @@ nbd_conn_receiver(void *arg)
 	while (atomic_load_int(&nc->nc_state) != NBD_CONN_HARD_DISCONNECTING)
 		nbd_conn_recv(nc);
 	socantsendmore(so);
+	cv_signal(&nc->nc_send_cv);
 	wakeup(&sc->sc_queue);
 	sema_post(&nc->nc_receiver_done);
 	kthread_exit();
+}
+
+static int
+nbd_conn_soupcall_snd(struct socket *so, void *arg, int waitflag __unused)
+{
+	struct nbd_conn *nc = arg;
+
+	if (sowriteable(so))
+		cv_signal(&nc->nc_send_cv);
+	return (SU_OK);
+}
+
+static int
+nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
+{
+	struct nbd_conn *nc = arg;
+
+	if (soreadabledata(so))
+		cv_signal(&nc->nc_receive_cv);
+	/*
+	 * XXX: We may have to signal with sbavail() < lowat if mb efficiency is
+	 * very bad.  For example, GCE images have mtu 1460 on lo0 by default,
+	 * causing the loopback interface to pass traffic in JUMBOP mbufs but
+	 * utilizing less than half of the space.  With large buffers, we do not
+	 * get the safety net of sb_efficiency making mbmax 8x hiwat, so we can
+	 * be out of buffer space and unable to receive more while being under
+	 * the low water mark.
+	 *
+	 * Check if we are out of space here to avoid blocking the receive
+	 * thread indefinitely.  It's possible all space is used by encrypted
+	 * TLS records and none is available yet, so we must still check that
+	 * some data is available before signaling the receive thread.
+	 */
+	else if (sbavail(&so->so_rcv) > 0 && sbspace(&so->so_rcv) <= 0)
+		cv_signal(&nc->nc_receive_cv);
+	/*
+	 * XXX: We may have a complete TLS record in the receive
+	 * buffer and not enough space for the next record.  Get
+	 * it out of the way.
+	 */
+	else if (so->so_rcv.sb_mbtail != NULL &&
+	    (so->so_rcv.sb_mbtail->m_flags & M_EOR) != 0)
+		cv_signal(&nc->nc_receive_cv);
+	return (SU_OK);
 }
 
 /* Not in releases yet. */
@@ -1111,6 +1217,8 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	nc->nc_state = NBD_CONN_CONNECTED;
 	TAILQ_INIT(&nc->nc_inflight);
 	mtx_init(&nc->nc_inflight_mtx, "gnbd:inflight", NULL, MTX_DEF);
+	cv_init(&nc->nc_send_cv, "gnbd:send");
+	cv_init(&nc->nc_receive_cv, "gnbd:receive");
 	sema_init(&nc->nc_receiver_done, 0, "gnbd:receiver_done");
 
 	mtx_lock(&sc->sc_conns_mtx);
@@ -1118,8 +1226,18 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	sc->sc_nconns++;
 	mtx_unlock(&sc->sc_conns_mtx);
 
+	SOCK_SENDBUF_LOCK(so);
+	so->so_snd.sb_lowat = so->so_snd.sb_hiwat + 1;
+	soupcall_set(so, SO_SND, nbd_conn_soupcall_snd, nc);
+	SOCK_SENDBUF_UNLOCK(so);
+	SOCK_RECVBUF_LOCK(so);
+	so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
+	soupcall_set(so, SO_RCV, nbd_conn_soupcall_rcv, nc);
+	SOCK_RECVBUF_UNLOCK(so);
+
 	sx_xlock(&g_nbd_lock);
 	g_nbd_nconns++;
+	/* XXX: assumed success... */
 	rc = kproc_kthread_add(nbd_conn_sender, nc, &g_nbd_proc, NULL, 0, 0,
 	    G_NBD_PROC_NAME, "gnbd %s sender", name);
 	G_NBD_DEBUG(G_NBD_DEBUG0, "%s add sender rc=%d", __func__, rc);
@@ -1221,6 +1339,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct g_nbd_softc *sc;
 	const char *host, *port, *name, *description;
 	uint64_t *sizep;
+	uint64_t size;
 	union {
 		uint32_t flags;
 		struct {
@@ -1229,12 +1348,15 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		};
 	} *flagsp;
 	uint32_t *minbsp, *prefbsp, *maxpayloadp;
+	uint32_t minbs, prefbs, maxpl;
 	bool *tlsp;
+	bool tls;
 	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
 	intmax_t *cp;
-	size_t limit, maxsz, minspace;
+	rlim_t sbsize;
+	u_long minspace;
 	int unit, nsockets;
 
 	g_topology_assert();
@@ -1264,6 +1386,13 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'size' argument.");
 		return;
 	}
+	size = *sizep;
+	if (size == 0) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'size' argument.");
+		return;
+	}
 	flagsp = gctl_get_paraml(req, "flags", sizeof(*flagsp));
 	if (flagsp == NULL) {
 		g_destroy_geom(gp);
@@ -1278,7 +1407,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'tls' argument.");
 		return;
 	}
-	if (*tlsp && g_nbd_tlsmax == 0) {
+	tls = *tlsp;
+	if (tls && g_nbd_tlsmax == 0) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "kern.ipc.tls.maxlen was not available when "
@@ -1292,12 +1422,14 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'minimum_blocksize' argument.");
 		return;
 	}
-	if (*minbsp > *sizep) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'minimum_blocksize' argument.");
-		return;
-	}
+	minbs = *minbsp;
+	/*
+	 * Servers may advertise minblocksize as small as 1 byte, but clients
+	 * should make requests of at least 512 bytes.  We'll cap the blocksize
+	 * at the size of the export, in case the server exports a small file.
+	 */
+	minbs = MAX(minbs, 512);
+	minbs = MIN(minbs, size);
 	prefbsp = gctl_get_paraml(req, "preferred_blocksize", sizeof(*prefbsp));
 	if (prefbsp == NULL) {
 		g_destroy_geom(gp);
@@ -1305,12 +1437,16 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'preferred_blocksize' argument.");
 		return;
 	}
-	if (*minbsp > *prefbsp) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'preferred_blocksize' argument.");
-		return;
-	}
+	prefbs = *prefbsp;
+	if (prefbs == 0)
+		prefbs = PAGE_SIZE; /* TODO: default could be tunable */
+	prefbs = MAX(prefbs, minbs);
+	prefbs = MIN(prefbs, size);
+	/*
+	 * Observe socket buffer size limits.
+	 */
+#define BUF_MAX_ADJ(_sz) (((u_quad_t)(_sz)) * MCLBYTES / (MSIZE + MCLBYTES))
+	sbsize = MIN(BUF_MAX_ADJ(sb_max), lim_cur(curthread, RLIMIT_SBSIZE));
 	maxpayloadp = gctl_get_paraml(req, "maximum_payload",
 	    sizeof(*maxpayloadp));
 	if (maxpayloadp == NULL) {
@@ -1319,32 +1455,36 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'maximum_payload' argument.");
 		return;
 	}
-	maxsz = *maxpayloadp;
-	limit = maxpayload;
-	if (*tlsp && limit > g_nbd_tlsmax)
-		limit = g_nbd_tlsmax;
-	if (maxsz > limit) {
-		G_NBD_DEBUG(1, "limiting max payload size to %zu", limit);
-		maxsz = limit;
-	}
-	if (*minbsp > maxsz) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'maximum_payload' argument.");
-		return;
-	}
-	minspace = sizeof(struct nbd_request) + maxsz;
+	maxpl = *maxpayloadp;
+	maxpl = MIN(maxpl, maxpayload);
+	if (maxpl == 0 /* unset */)
+		maxpl = maxpayload; /* tunable default */
+	/*
+	 * Ensure minimum default sendspace/recvspace sizes can fit the minimum
+	 * block size.  Actual sizes should be much higher (up to sbsize).
+	 */
+	minspace = sizeof(struct nbd_request) + minbs;
 	if (sendspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace -> %zu",
-		    minspace);
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
+		    sendspace, minspace);
 		sendspace = minspace;
 	}
+	if (sendspace > sbsize) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
+		    sendspace, sbsize);
+		sendspace = sbsize;
+	}
 	/* TODO: support structured replies */
-	minspace = sizeof(struct nbd_simple_reply) + maxsz;
+	minspace = sizeof(struct nbd_simple_reply) + minbs;
 	if (recvspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace -> %zu",
-		    minspace);
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
+		    recvspace, minspace);
 		recvspace = minspace;
+	}
+	if (recvspace > sbsize) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
+		    recvspace, sbsize);
+		recvspace = sbsize;
 	}
 	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
 	if (cp == NULL) {
@@ -1379,18 +1519,13 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_name = strdup(name, M_GEOM);
 	if (description != NULL)
 		sc->sc_description = strdup(description, M_GEOM);
-	sc->sc_size = *sizep;
+	sc->sc_size = size;
 	sc->sc_flags = flagsp->flags;
-	/*
-	 * NB: Servers may advertise minblocksize as small as 1 byte, but
-	 * clients should make requests of at least 512 bytes.
-	 */
-	sc->sc_minblocksize = MAX(*minbsp, 1 << 9 /* 512 */);
-	/* NB: Servers must abide this constraint, but we ensure it. */
-	sc->sc_prefblocksize = MAX(*prefbsp, sc->sc_minblocksize);
-	sc->sc_maxpayload = maxsz;
+	sc->sc_minblocksize = minbs;
+	sc->sc_prefblocksize = prefbs;
+	sc->sc_maxpayload = maxpl;
 	sc->sc_unit = unit;
-	sc->sc_tls = *tlsp;
+	sc->sc_tls = tls;
 	sc->sc_geom = gp;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
