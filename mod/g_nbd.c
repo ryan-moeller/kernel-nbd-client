@@ -952,8 +952,8 @@ g_nbd_free(struct g_nbd_softc *sc)
 	    ("tried to free with bios in queue"));
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
-	gp->softc = NULL;
 	g_topology_lock();
+	gp->softc = NULL;
 	g_wither_geom(gp, ENXIO);
 	g_topology_unlock();
 	free_unr(g_nbd_unit, sc->sc_unit);
@@ -1502,10 +1502,12 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	g_free(sockets);
 }
 
-static inline void
+static void
 g_nbd_destroy(struct g_nbd_softc *sc)
 {
 	struct nbd_conn *nc;
+
+	g_topology_assert();
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
 	mtx_lock(&sc->sc_conns_mtx);
@@ -1577,6 +1579,9 @@ g_nbd_ctl_destroy(struct gctl_req *req __unused, struct g_class *mp __unused,
 {
 	struct g_nbd_softc *sc = gp->softc;
 
+	g_topology_assert();
+
+	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
 	g_nbd_destroy(sc);
 	return (EBUSY);
 }
