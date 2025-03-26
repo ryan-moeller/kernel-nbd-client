@@ -136,6 +136,7 @@ struct g_nbd_softc {
 	uint32_t	sc_maxpayload;
 	u_int		sc_unit;
 	bool		sc_tls;
+	struct g_geom	*sc_geom;
 	struct g_provider	*sc_provider;
 	struct bio_queue	sc_queue;
 	struct mtx	sc_queue_mtx;
@@ -944,7 +945,7 @@ bio_queue_empty(struct bio_queue *queue)
 static inline void
 g_nbd_free(struct g_nbd_softc *sc)
 {
-	struct g_geom *gp = sc->sc_provider->geom;
+	struct g_geom *gp = sc->sc_geom;
 
 	KASSERT(sc->sc_nconns == 0, ("tried to free with connections"));
 	KASSERT(bio_queue_empty(&sc->sc_queue),
@@ -1390,6 +1391,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_maxpayload = maxsz;
 	sc->sc_unit = unit;
 	sc->sc_tls = *tlsp;
+	sc->sc_geom = gp;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
 	SLIST_INIT(&sc->sc_connections);
