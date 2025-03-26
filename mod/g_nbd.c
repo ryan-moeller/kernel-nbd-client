@@ -344,6 +344,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	int16_t cmd = bio_to_nbd_cmd(bp);
 	int error;
 	bool tls = nc->nc_softc->sc_tls;
+	int retries = 0;
 
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
@@ -480,25 +481,36 @@ retry:
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
 			G_NBD_LOGREQ(G_NBD_WARN, bp,
-			    "%s reserving more snd space", __func__);
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
+			    "%s not enough snd space", __func__);
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
 			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
 			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
 			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
 			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
-			if (!sbreserve_locked(so, SO_SND, needed, curthread))
-				G_NBD_LOGREQ(G_NBD_WARN, bp,
-				    "sbreserve failed");
-			so->so_snd.sb_flags |= SB_AUTOSIZE;
-			continue;
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
+			    "reducing maxpayload to %d", so->so_snd.sb_hiwat);
+			nc->nc_softc->sc_maxpayload = so->so_snd.sb_hiwat;
+			SOCK_SENDBUF_UNLOCK(so);
+			m_freem(m);
+			nbd_conn_remove_inflight_specific(nc, ni);
+			nbd_inflight_deliver(ni, EOVERFLOW);
+			return;
 		}
 		sbwait(so, SO_SND);
 	}
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
 	if (error == EWOULDBLOCK) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s sosend would block", __func__);
-		goto retry;
+		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s sosend would block (%d)",
+		    __func__, retries);
+		G_NBD_LOGREQ(G_NBD_WARN, bp,
+		    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
+		    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
+		    so->so_snd.sb_ccc, so->so_snd.sb_acc,
+		    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
+		/* XXX: arbirary retry limit */
+		if (retries++ < 10)
+			goto retry;
 	}
 	if (error != 0) {
 		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)", __func__,
@@ -825,7 +837,7 @@ retry:
 			/* XXX: how did we get here? what if this fails? */
 			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
 			    __func__);
-			G_NBD_DEBUG(G_NBD_DEBUG0,
+			G_NBD_DEBUG(G_NBD_WARN,
 			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
 			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
 			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
@@ -841,6 +853,11 @@ retry:
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
 	if (error == EWOULDBLOCK) {
 		G_NBD_DEBUG(G_NBD_WARN, "%s sosend would block", __func__);
+		G_NBD_DEBUG(G_NBD_WARN,
+		    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
+		    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
+		    so->so_snd.sb_ccc, so->so_snd.sb_acc,
+		    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
 		goto retry;
 	}
 	if (error != 0) {
