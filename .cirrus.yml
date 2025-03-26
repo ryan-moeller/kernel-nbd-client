@@ -36,7 +36,6 @@ task:
   build_script:
     # eval needed for proper variable expansion. Cirrus counts it as an empty
     # arg when empty, but we want no args from it when empty.
-    - eval make ${DEBUG_ARGS} clean
     - eval make ${DEBUG_ARGS} -j${CIRRUS_CPU}
     - eval make ${DEBUG_ARGS} install
   manlint_script:
