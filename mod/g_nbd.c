@@ -295,9 +295,12 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 		G_NBD_LOGREQ(G_NBD_WARN, bp, "so_error=%d", so->so_error);
 		return (false);
 	}
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "not connected");
+		return (false);
+	}
 	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
-		    "so_snd.sb_state & SBS_CANTSENDMORE");
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot send more");
 		return (false);
 	}
 	return (true);
@@ -553,8 +556,7 @@ nbd_conn_recv_ok(struct nbd_conn *nc, struct bio *bp)
 		return (false);
 	}
 	if ((so->so_rcv.sb_state & SBS_CANTRCVMORE) != 0) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
-		    "so_rcv.sb_state & SBS_CANTRCVMORE");
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot receive more");
 		return (false);
 	}
 	return (true);
@@ -782,7 +784,7 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 		return (false);
 	}
 	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0) {
-		G_NBD_DEBUG(G_NBD_DEBUG0, "so_snd.sb_state & SBS_CANTSENDMORE");
+		G_NBD_DEBUG(G_NBD_DEBUG0, "cannot send more");
 		return (false);
 	}
 	return (true);
