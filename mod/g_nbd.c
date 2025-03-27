@@ -465,7 +465,7 @@ retry:
 		}
 	}
 	SOCK_SENDBUF_LOCK(so);
-	so->so_snd.sb_lowat = needed;
+	so->so_snd.sb_lowat = MAX(needed, so->so_snd.sb_hiwat / 8);
 	while (!sowriteable(so)) {
 		if (!nbd_conn_send_ok(nc, bp)) {
 			SOCK_SENDBUF_UNLOCK(so);
