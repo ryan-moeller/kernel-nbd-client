@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2016-2025 Ryan Moeller
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
 #ifndef _NBD_PROTOCOL_H_
 #define _NBD_PROTOCOL_H_
 
