@@ -16,6 +16,7 @@
 #include <sys/module.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
+#include <sys/protosw.h>
 #include <sys/queue.h>
 #include <sys/refcount.h>
 #include <sys/sbuf.h>
@@ -461,7 +462,8 @@ retry:
 		}
 	}
 	SOCK_SENDBUF_LOCK(so);
-	while (sbspace(&so->so_snd) < needed) {
+	so->so_snd.sb_lowat = needed;
+	while (!sowriteable(so)) {
 		if (!nbd_conn_send_ok(nc, bp)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
@@ -472,7 +474,6 @@ retry:
 			nbd_inflight_deliver(ni, ENXIO);
 			return;
 		}
-		so->so_snd.sb_lowat = needed;
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
 			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
@@ -809,14 +810,14 @@ retry:
 	req->command = htobe16(NBD_CMD_DISCONNECT);
 	needed = sizeof(*req);
 	SOCK_SENDBUF_LOCK(so);
-	while (sbspace(&so->so_snd) < needed) {
+	so->so_snd.sb_lowat = needed;
+	while (!sowriteable(so)) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
 			m_free(m);
 			return;
 		}
-		so->so_snd.sb_lowat = needed;
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
 			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
