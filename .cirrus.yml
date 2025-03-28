@@ -44,6 +44,7 @@ task:
     - tail -F /var/log/messages
   load_script:
     - gnbd load
+    - sysctl kern.ipc.tls.enable=1
   ca_info_file:
     path: ${WD}/ca.info
     from_contents: |
@@ -154,7 +155,6 @@ task:
     # Unset the NBD variable in the env.
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   test_connect_tls_script:
-    - sysctl kern.ipc.tls.enable=1
     - gnbd connect -n ${MD}
       -A ${WD}/cacert.pem
       -C ${WD}/clientcert.pem
