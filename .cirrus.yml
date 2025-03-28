@@ -44,6 +44,7 @@ task:
     - tail -F /var/log/messages
   load_script:
     - gnbd load
+    - sysctl kern.geom.nbd.debug=1
     - sysctl kern.ipc.tls.enable=1
   ca_info_file:
     path: ${WD}/ca.info
