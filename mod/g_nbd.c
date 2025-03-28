@@ -1411,7 +1411,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	pp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE |
 	    G_PF_ACCEPT_UNMAPPED;
 	pp->mediasize = sc->sc_size;
-	pp->sectorsize = sc->sc_prefblocksize;
+	pp->sectorsize = sc->sc_minblocksize;
+	pp->stripesize = sc->sc_prefblocksize;
 	sc->sc_provider = pp;
 	g_error_provider(pp, 0);
 	for (int i = 0; i < nsockets; i++)
