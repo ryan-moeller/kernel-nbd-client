@@ -1390,8 +1390,13 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		sc->sc_description = strdup(description, M_GEOM);
 	sc->sc_size = *sizep;
 	sc->sc_flags = flagsp->flags;
-	sc->sc_minblocksize = *minbsp;
-	sc->sc_prefblocksize = *prefbsp;
+	/*
+	 * NB: Servers may advertise minblocksize as small as 1 byte, but
+	 * clients should make requests of at least 512 bytes.
+	 */
+	sc->sc_minblocksize = MAX(*minbsp, 1 << 9 /* 512 */);
+	/* NB: Servers must abide this constraint, but we ensure it. */
+	sc->sc_prefblocksize = MAX(*prefbsp, sc->sc_minblocksize);
 	sc->sc_maxpayload = maxsz;
 	sc->sc_unit = unit;
 	sc->sc_tls = *tlsp;
