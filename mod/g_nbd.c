@@ -479,15 +479,16 @@ retry:
 		}
 		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
 			/* XXX: how did we get here? what if this fails? */
-			G_NBD_DEBUG(G_NBD_WARN, "%s reserving more snd space",
-			    __func__);
-			G_NBD_DEBUG(G_NBD_DEBUG0,
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
+			    "%s reserving more snd space", __func__);
+			G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
 			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
 			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
 			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
 			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
 			if (!sbreserve_locked(so, SO_SND, needed, curthread))
-				G_NBD_DEBUG(G_NBD_WARN, "sbreserve failed");
+				G_NBD_LOGREQ(G_NBD_WARN, bp,
+				    "sbreserve failed");
 			so->so_snd.sb_flags |= SB_AUTOSIZE;
 			continue;
 		}
@@ -496,11 +497,11 @@ retry:
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
 	if (error == EWOULDBLOCK) {
-		G_NBD_DEBUG(G_NBD_WARN, "%s sosend would block", __func__);
+		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s sosend would block", __func__);
 		goto retry;
 	}
 	if (error != 0) {
-		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
+		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)", __func__,
 		    error);
 		if (error != ENOMEM && error != EINTR && error != ERESTART)
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
