@@ -19,6 +19,7 @@
 #include <sys/protosw.h>
 #include <sys/queue.h>
 #include <sys/refcount.h>
+#include <sys/resourcevar.h>
 #include <sys/sbuf.h>
 #include <sys/sched.h>
 #include <sys/sema.h>
@@ -30,6 +31,7 @@
 #include <sys/uio.h>
 
 #include <vm/uma.h>
+#include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
 #include <machine/atomic.h>
@@ -49,14 +51,14 @@ static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
 static int g_nbd_debug = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
     "Debug level");
-static int maxpayload = 256 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
-    "Maximum payload size");
-static int sendspace = 1536 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
+static uint32_t maxpayload = 1 << 25;
+SYSCTL_U32(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
+    "Default maximum payload size");
+static u_long sendspace = 1536 * 1024;
+SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
     "Default socket send buffer size");
-static int recvspace = 1536 * 1024;
-SYSCTL_INT(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
+static u_long recvspace = 1536 * 1024;
+SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
     "Default socket receive buffer size");
 static int identfmt = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, identfmt, CTLFLAG_RWTUN, &identfmt, 0,
@@ -332,6 +334,120 @@ nbd_request_mbuf(bool tls, struct nbd_request **reqp)
 	return (m);
 }
 
+static struct mbuf *
+nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
+{
+	struct bio *bp = ni->ni_bio;
+	vm_ooffset_t start = *offset;
+	struct mbuf *m;
+
+	KASSERT(limit > 0, ("%s limit is zero", __func__));
+	KASSERT(start < bp->bio_length, ("%s offset %zu out of bounds",
+	    __func__, start));
+
+	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s %s limit=%zu *offset=%zu", __func__,
+	      tls ? "tls" : "notls", limit, start);
+	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+		struct mbuf *d, *m_tail;
+		size_t page_offset = start == 0 ? bp->bio_ma_offset : 0;
+		size_t resid = bp->bio_length;
+		size_t len;
+		int first_ma = OFF_TO_IDX(start + page_offset);
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped write", __func__);
+		if (resid > limit)
+			/* Reduce limit to end on a page boundary. */
+			resid = trunc_page(limit - page_offset) + page_offset;
+		*offset += resid;
+		m = m_tail = d = NULL;
+		for (int i = 0; resid > 0; i++) {
+			if (d == NULL) {
+				d = mb_alloc_ext_pgs(M_NOWAIT,
+#if __FreeBSD_version > 1500026
+				    nbd_inflight_free_mext, M_RDONLY);
+#else
+				    nbd_inflight_free_mext);
+#endif
+				if (d == NULL) {
+					m_freem(m);
+					return (NULL);
+				}
+				refcount_acquire(&ni->ni_refs);
+				d->m_ext.ext_arg1 = ni;
+				d->m_epg_1st_off = page_offset;
+				if (m == NULL)
+					m = d;
+			}
+			len = MIN(resid, PAGE_SIZE - page_offset);
+			d->m_epg_pa[d->m_epg_npgs++] =
+			    VM_PAGE_TO_PHYS(bp->bio_ma[first_ma + i]);
+			d->m_epg_last_len = len;
+			d->m_len += len;
+			d->m_ext.ext_size += PAGE_SIZE;
+			MBUF_EXT_PGS_ASSERT_SANITY(d);
+			if (d->m_epg_npgs == MBUF_PEXT_MAX_PGS || (tls &&
+			    d->m_epg_npgs == (g_nbd_tlsmax >> PAGE_SHIFT))) {
+				if (m_tail != NULL)
+					m_tail->m_next = d;
+				m_tail = d;
+				d = NULL;
+			}
+			page_offset = 0;
+			resid -= len;
+		}
+		if (m_tail != NULL)
+			m_tail->m_next = d;
+	} else if (tls) {
+		struct mbuf *d, *m_tail;
+		off_t start = *offset;
+		c_caddr_t data = bp->bio_data + start;
+		size_t resid = bp->bio_length - start;
+		size_t len;
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (tls)",
+		    __func__);
+		if (resid > limit)
+			/* Reduce limit to end on a page boundary. */
+			resid = trunc_page(limit);
+		*offset += resid;
+		m = NULL;
+		while (resid > 0) {
+			len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
+			len = MIN(len, g_nbd_tlsmax);
+			d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
+			if (d == NULL) {
+				m_freem(m);
+				return (NULL);
+			}
+			d->m_len = len;
+			d->m_ext.ext_size = d->m_epg_npgs * PAGE_SIZE;
+			d->m_epg_last_len =
+			    PAGE_SIZE - (d->m_ext.ext_size - len);
+			MBUF_EXT_PGS_ASSERT_SANITY(d);
+			m_copyback(d, 0, len, data);
+			if (m == NULL)
+				m = m_tail = d;
+			m_tail->m_next = d;
+			m_tail = d;
+			data += len;
+			resid -= len;
+		}
+	} else {
+		size_t len = MIN(bp->bio_length - start, limit);
+
+		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write", __func__);
+		m = m_get(M_NOWAIT, MT_DATA);
+		if (m == NULL)
+			return (NULL);
+		refcount_acquire(&ni->ni_refs);
+		m_extadd(m, bp->bio_data + start, len, nbd_inflight_free_mext,
+		    ni, NULL, M_RDONLY, EXT_MOD_TYPE);
+		m->m_len = len;
+		*offset += len;
+	}
+	return (m);
+}
+
 static void
 nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
@@ -339,12 +455,12 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	struct bio *bp = ni->ni_bio;
 	struct nbd_request *req;
 	struct mbuf *m;
-	size_t needed;
+	size_t needed, offset, resid;
 	uint16_t flags = 0; /* no command flags supported currently */
 	int16_t cmd = bio_to_nbd_cmd(bp);
-	int error;
+	int error, retries = 0;
 	bool tls = nc->nc_softc->sc_tls;
-	int retries = 0;
+	bool header_todo = true;
 
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
@@ -363,164 +479,104 @@ retry:
 	req->cookie = htobe64(ni->ni_cookie);
 	req->offset = htobe64(bp->bio_offset);
 	req->length = htobe32(bp->bio_length);
-	needed = sizeof(*req);
-	if (cmd == NBD_CMD_WRITE) {
-		struct mbuf *d;
+	needed = resid = sizeof(*req);
+	if (cmd == NBD_CMD_WRITE)
+		resid += bp->bio_length;
+	offset = 0;
+	do {
+		if (cmd == NBD_CMD_WRITE) {
+			size_t limit = so->so_snd.sb_hiwat - needed;
+			size_t prev_offset = offset;
+			size_t amount;
+			struct mbuf *d;
 
-		if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
-			struct mbuf *m_tail = m;
-			size_t page_offset = bp->bio_ma_offset;
-			size_t resid = bp->bio_length;
-			size_t len;
-
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped write",
-			    __func__);
-			d = NULL;
-			for (int i = 0; resid > 0; i++) {
-				if (d == NULL) {
-					d = mb_alloc_ext_pgs(M_NOWAIT,
-#if __FreeBSD_version > 1500026
-					    nbd_inflight_free_mext, M_RDONLY);
-#else
-					    nbd_inflight_free_mext);
-#endif
-					if (d == NULL) {
-						m_freem(m);
-						nbd_conn_remove_inflight_specific(
-						    nc, ni);
-						nbd_inflight_deliver(ni,
-						    ENOMEM);
-						return;
-					}
-					refcount_acquire(&ni->ni_refs);
-					d->m_ext.ext_arg1 = ni;
-					d->m_epg_1st_off = page_offset;
-				}
-				len = MIN(resid, PAGE_SIZE - page_offset);
-				d->m_epg_pa[d->m_epg_npgs++] =
-				    VM_PAGE_TO_PHYS(bp->bio_ma[i]);
-				d->m_epg_last_len = len;
-				d->m_len += len;
-				d->m_ext.ext_size += PAGE_SIZE;
-				MBUF_EXT_PGS_ASSERT_SANITY(d);
-				if (d->m_epg_npgs == MBUF_PEXT_MAX_PGS) {
-					m_tail->m_next = d;
-					m_tail = d;
-					needed += d->m_len;
-					d = NULL;
-				}
-				page_offset = 0;
-				resid -= len;
-			}
-			if (d != NULL) {
-				m_tail->m_next = d;
-				needed += d->m_len;
-			}
-		} else if (tls) {
-			struct mbuf *m_tail = m;
-			c_caddr_t data = bp->bio_data;
-			size_t resid = bp->bio_length;
-			size_t len;
-
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (tls)",
-			    __func__);
-			needed += resid;
-			while (resid > 0) {
-				len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
-				d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
-				if (d == NULL) {
-					m_free(m);
-					nbd_conn_remove_inflight_specific(nc,
-					    ni);
-					nbd_inflight_deliver(ni, ENOMEM);
-					return;
-				}
-				d->m_len = len;
-				d->m_ext.ext_size = d->m_epg_npgs * PAGE_SIZE;
-				d->m_epg_last_len =
-				    PAGE_SIZE - (d->m_ext.ext_size - len);
-				MBUF_EXT_PGS_ASSERT_SANITY(d);
-				m_copyback(d, 0, len, data);
-				m_tail->m_next = d;
-				m_tail = d;
-				data += len;
-				resid -= len;
-			}
-		} else {
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write",
-			    __func__);
-			d = m_get(M_NOWAIT, MT_DATA);
+			d = nbd_write_mbufs(ni, tls, limit, &offset);
 			if (d == NULL) {
 				m_free(m);
 				nbd_conn_remove_inflight_specific(nc, ni);
 				nbd_inflight_deliver(ni, ENOMEM);
 				return;
 			}
-			refcount_acquire(&ni->ni_refs);
-			m_extadd(d, bp->bio_data, bp->bio_length,
-			    nbd_inflight_free_mext, ni, NULL, M_RDONLY,
-			    EXT_MOD_TYPE);
-			d->m_len = bp->bio_length;
-			needed += d->m_len;
-			m->m_next = d;
+			if (m == NULL)
+				m = d;
+			else
+				m->m_next = d;
+			amount = offset - prev_offset;
+			MPASS(amount == m_length(d, NULL));
+			needed += amount;
 		}
-	}
-	SOCK_SENDBUF_LOCK(so);
-	so->so_snd.sb_lowat = MAX(needed, so->so_snd.sb_hiwat / 8);
-	while (!sowriteable(so)) {
-		if (!nbd_conn_send_ok(nc, bp)) {
-			SOCK_SENDBUF_UNLOCK(so);
-			G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
-			    __func__);
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-			m_freem(m);
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, ENXIO);
-			return;
+		MPASS(m != NULL);
+		SOCK_SENDBUF_LOCK(so);
+		so->so_snd.sb_lowat = MAX(needed, so->so_snd.sb_hiwat / 8);
+		while (!sowriteable(so)) {
+			if (!nbd_conn_send_ok(nc, bp)) {
+				SOCK_SENDBUF_UNLOCK(so);
+				G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
+				    __func__);
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
+				m_freem(m);
+				nbd_conn_remove_inflight_specific(nc, ni);
+				nbd_inflight_deliver(ni, ENXIO);
+				return;
+			}
+			if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
+				/* XXX: can we still get here? */
+				G_NBD_LOGREQ(G_NBD_WARN, bp,
+				    "%s not enough snd space", __func__);
+				G_NBD_LOGREQ(G_NBD_WARN, bp,
+				    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
+				    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
+				    so->so_snd.sb_ccc, so->so_snd.sb_acc,
+				    so->so_snd.sb_flags & 0xffff,
+				    PRINT_SB_FLAGS);
+				G_NBD_LOGREQ(G_NBD_WARN, bp,
+				    "reducing maxpayload to %d",
+				    so->so_snd.sb_hiwat);
+				nc->nc_softc->sc_maxpayload =
+				    so->so_snd.sb_hiwat;
+				SOCK_SENDBUF_UNLOCK(so);
+				m_freem(m);
+				nbd_conn_remove_inflight_specific(nc, ni);
+				nbd_inflight_deliver(ni, EOVERFLOW);
+				return;
+			}
+			sbwait(so, SO_SND);
 		}
-		if (so->so_snd.sb_lowat > so->so_snd.sb_hiwat) {
-			/* XXX: how did we get here? what if this fails? */
+		SOCK_SENDBUF_UNLOCK(so);
+		error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
+		if (error == EWOULDBLOCK) {
 			G_NBD_LOGREQ(G_NBD_WARN, bp,
-			    "%s not enough snd space", __func__);
+			    "%s sosend would block (%d)", __func__, retries);
 			G_NBD_LOGREQ(G_NBD_WARN, bp,
 			    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
 			    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
 			    so->so_snd.sb_ccc, so->so_snd.sb_acc,
 			    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
-			G_NBD_LOGREQ(G_NBD_WARN, bp,
-			    "reducing maxpayload to %d", so->so_snd.sb_hiwat);
-			nc->nc_softc->sc_maxpayload = so->so_snd.sb_hiwat;
-			SOCK_SENDBUF_UNLOCK(so);
-			m_freem(m);
+			/* XXX: arbirary retry limit */
+			if (retries++ < 10) {
+				if (header_todo)
+					goto retry;
+				offset -= needed;
+				needed = 0;
+				error = 0;
+			}
+		}
+		if (error != 0) {
+			G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)",
+			    __func__, error);
+			if (error != ENOMEM && error != EINTR &&
+			    error != ERESTART)
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
 			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, EOVERFLOW);
+			nbd_inflight_deliver(ni, error);
 			return;
 		}
-		sbwait(so, SO_SND);
-	}
-	SOCK_SENDBUF_UNLOCK(so);
-	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
-	if (error == EWOULDBLOCK) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s sosend would block (%d)",
-		    __func__, retries);
-		G_NBD_LOGREQ(G_NBD_WARN, bp,
-		    "lowat=%d hiwat=%d ccc=%d acc=%d flags=%b",
-		    so->so_snd.sb_lowat, so->so_snd.sb_hiwat,
-		    so->so_snd.sb_ccc, so->so_snd.sb_acc,
-		    so->so_snd.sb_flags & 0xffff, PRINT_SB_FLAGS);
-		/* XXX: arbirary retry limit */
-		if (retries++ < 10)
-			goto retry;
-	}
-	if (error != 0) {
-		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)", __func__,
-		    error);
-		if (error != ENOMEM && error != EINTR && error != ERESTART)
-			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-		nbd_conn_remove_inflight_specific(nc, ni);
-		nbd_inflight_deliver(ni, error);
-		return;
-	}
+		resid -= needed;
+		needed = 0;
+		m = NULL;
+	} while (resid > 0);
 }
 
 static inline void
@@ -1232,6 +1288,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct g_nbd_softc *sc;
 	const char *host, *port, *name, *description;
 	uint64_t *sizep;
+	uint64_t size;
 	union {
 		uint32_t flags;
 		struct {
@@ -1240,12 +1297,15 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		};
 	} *flagsp;
 	uint32_t *minbsp, *prefbsp, *maxpayloadp;
+	uint32_t minbs, prefbs, maxpl;
 	bool *tlsp;
+	bool tls;
 	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
 	intmax_t *cp;
-	size_t limit, maxsz;
+	rlim_t sbsize;
+	u_long minspace;
 	int unit, nsockets;
 
 	g_topology_assert();
@@ -1275,6 +1335,13 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'size' argument.");
 		return;
 	}
+	size = *sizep;
+	if (size == 0) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Invalid 'size' argument.");
+		return;
+	}
 	flagsp = gctl_get_paraml(req, "flags", sizeof(*flagsp));
 	if (flagsp == NULL) {
 		g_destroy_geom(gp);
@@ -1289,7 +1356,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'tls' argument.");
 		return;
 	}
-	if (*tlsp && g_nbd_tlsmax == 0) {
+	tls = *tlsp;
+	if (tls && g_nbd_tlsmax == 0) {
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "kern.ipc.tls.maxlen was not available when "
@@ -1303,12 +1371,14 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'minimum_blocksize' argument.");
 		return;
 	}
-	if (*minbsp > *sizep) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'minimum_blocksize' argument.");
-		return;
-	}
+	minbs = *minbsp;
+	/*
+	 * Servers may advertise minblocksize as small as 1 byte, but clients
+	 * should make requests of at least 512 bytes.  We'll cap the blocksize
+	 * at the size of the export, in case the server exports a small file.
+	 */
+	minbs = MAX(minbs, 512);
+	minbs = MIN(minbs, size);
 	prefbsp = gctl_get_paraml(req, "preferred_blocksize", sizeof(*prefbsp));
 	if (prefbsp == NULL) {
 		g_destroy_geom(gp);
@@ -1316,11 +1386,22 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'preferred_blocksize' argument.");
 		return;
 	}
-	if (*minbsp > *prefbsp) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'preferred_blocksize' argument.");
-		return;
+	prefbs = *prefbsp;
+	if (prefbs == 0)
+		prefbs = PAGE_SIZE; /* TODO: default could be tunable */
+	prefbs = MAX(prefbs, minbs);
+	prefbs = MIN(prefbs, size);
+	/*
+	 * Observe socket buffer size limits.  MLEN accounts for header mbuf.
+	 */
+#define BUF_MAX_ADJ(_sz) (((u_quad_t)(_sz)) * MCLBYTES / (MSIZE + MCLBYTES))
+	sbsize = MIN(BUF_MAX_ADJ(sb_max), lim_cur(curthread, RLIMIT_SBSIZE));
+	if (MLEN + maxpayload > sbsize) {
+		uint32_t newmax = sbsize - MLEN;
+
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.maxpayload %u -> %u",
+		    maxpayload, newmax);
+		maxpayload = newmax;
 	}
 	maxpayloadp = gctl_get_paraml(req, "maximum_payload",
 	    sizeof(*maxpayloadp));
@@ -1330,19 +1411,25 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "No 'maximum_payload' argument.");
 		return;
 	}
-	maxsz = *maxpayloadp;
-	limit = maxpayload;
-	if (*tlsp && limit > g_nbd_tlsmax)
-		limit = g_nbd_tlsmax;
-	if (maxsz > limit) {
-		G_NBD_DEBUG(1, "limiting max payload size to %zu", limit);
-		maxsz = limit;
+	maxpl = *maxpayloadp;
+	maxpl = MIN(maxpl, maxpayload);
+	if (maxpl == 0 /* unset */)
+		maxpl = maxpayload; /* tunable default */
+	/*
+	 * Ensure minimum default sendspace/recvspace sizes.
+	 */
+	minspace = sizeof(struct nbd_request) + maxpl;
+	if (sendspace < minspace) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
+		    sendspace, minspace);
+		sendspace = minspace;
 	}
-	if (*minbsp > maxsz) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		gctl_error(req, "Invalid 'maximum_payload' argument.");
-		return;
+	/* TODO: support structured replies */
+	minspace = sizeof(struct nbd_simple_reply) + maxpl;
+	if (recvspace < minspace) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
+		    recvspace, minspace);
+		recvspace = minspace;
 	}
 	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
 	if (cp == NULL) {
@@ -1377,18 +1464,13 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_name = strdup(name, M_GEOM);
 	if (description != NULL)
 		sc->sc_description = strdup(description, M_GEOM);
-	sc->sc_size = *sizep;
+	sc->sc_size = size;
 	sc->sc_flags = flagsp->flags;
-	/*
-	 * NB: Servers may advertise minblocksize as small as 1 byte, but
-	 * clients should make requests of at least 512 bytes.
-	 */
-	sc->sc_minblocksize = MAX(*minbsp, 1 << 9 /* 512 */);
-	/* NB: Servers must abide this constraint, but we ensure it. */
-	sc->sc_prefblocksize = MAX(*prefbsp, sc->sc_minblocksize);
-	sc->sc_maxpayload = maxsz;
+	sc->sc_minblocksize = minbs;
+	sc->sc_prefblocksize = prefbs;
+	sc->sc_maxpayload = maxpl;
 	sc->sc_unit = unit;
-	sc->sc_tls = *tlsp;
+	sc->sc_tls = tls;
 	sc->sc_geom = gp;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);

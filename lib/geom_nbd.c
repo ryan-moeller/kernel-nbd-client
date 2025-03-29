@@ -771,12 +771,6 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	tls = client.ssl_ctx != NULL;
 #endif
 	gctl_ro_param(req, "tls", sizeof(tls), &tls);
-	/*
-	 * Default client properties that may be overridden by negotiation.
-	 */
-	client.minimum_blocksize = 1 << 9;	/* 512 */
-	client.preferred_blocksize = 1 << 12;	/* 4096 */
-	client.maximum_payload = 1 << 25;	/* 33554432 */
 	sockets = malloc(sizeof(*sockets) * nsockets);
 	assert(sockets != NULL); /* can't do much if ENOMEM */
 	for (int i = 0; i < nsockets; i++) {
