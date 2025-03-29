@@ -1155,9 +1155,9 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 		error = getsock(td, sp[i],
 		    cap_rights_init_one(&rights, CAP_SOCK_CLIENT), &fp);
 		if (error != 0) {
+			PROC_UNLOCK(td->td_proc);
 			for (int j = 0; j < i; j++)
 				soclose(sockets[j]);
-			PROC_UNLOCK(td->td_proc);
 			g_free(sockets);
 			gctl_error(req, "Invalid socket (sockets[%d]=%d).",
 			    i, sp[i]);
@@ -1165,10 +1165,10 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 		}
 		so = fp->f_data;
 		if (so->so_type != SOCK_STREAM) {
+			fdrop(fp, td);
+			PROC_UNLOCK(td->td_proc);
 			for (int j = 0; j < i; j++)
 				soclose(sockets[j]);
-			PROC_UNLOCK(td->td_proc);
-			fdrop(fp, td);
 			g_free(sockets);
 			gctl_error(req, "Invalid socket type (sockets[%d]=%d).",
 			    i, sp[i]);
@@ -1183,39 +1183,24 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 		fp->f_ops = &badfileops;
 		fp->f_data = NULL;
 		fdrop(fp, td);
+		/*
+		 * Set the buffer reservations while we have the socket handy.
+		 */
+		error = soreserve(so, sendspace, recvspace);
+		if (error != 0) {
+			PROC_UNLOCK(td->td_proc);
+			for (int j = 0; j < i; j++)
+				soclose(sockets[j]);
+			g_free(sockets);
+			gctl_error(req, "soreserve failed (%d)", error);
+			return (NULL);
+		}
+		so->so_snd.sb_flags |= SB_AUTOSIZE;
+		so->so_rcv.sb_flags |= SB_AUTOSIZE;
 		sockets[i] = so;
 	}
 	PROC_UNLOCK(td->td_proc);
 	return (sockets);
-}
-
-static int
-g_nbd_ctl_setup_socket(struct gctl_req *req, struct socket *so, size_t maxsz)
-{
-	size_t minspace;
-	int error;
-
-	minspace = sizeof(struct nbd_request) + maxsz;
-	if (sendspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace -> %zu",
-		    minspace);
-		sendspace = minspace;
-	}
-	/* TODO: support structured replies */
-	minspace = sizeof(struct nbd_simple_reply) + maxsz;
-	if (recvspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace -> %zu",
-		    minspace);
-		recvspace = minspace;
-	}
-	error = soreserve(so, sendspace, recvspace);
-	if (error != 0) {
-		gctl_error(req, "soreserve failed (%d)", error);
-		return (error);
-	}
-	so->so_snd.sb_flags |= SB_AUTOSIZE;
-	so->so_rcv.sb_flags |= SB_AUTOSIZE;
-	return (0);
 }
 
 static inline void
@@ -1356,31 +1341,18 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "Invalid 'connections' argument.");
 		return;
 	}
-	sockets = g_nbd_ctl_steal_sockets(req, nsockets);
-	if (sockets == NULL) {
-		g_destroy_geom(gp);
-		free_unr(g_nbd_unit, unit);
-		return;
-	}
 	if ((flagsp->transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
 	    nsockets > 1) {
-		for (int i = 0; i < nsockets; i++)
-			soclose(sockets[i]);
-		g_free(sockets);
 		g_destroy_geom(gp);
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "Server doesn't support multiple connections.");
 		return;
 	}
-	for (int i = 0; i < nsockets; i++) {
-		if (g_nbd_ctl_setup_socket(req, sockets[i], maxsz) != 0) {
-			for (i = 0; i < nsockets; i++)
-				soclose(sockets[i]);
-			g_free(sockets);
-			g_destroy_geom(gp);
-			free_unr(g_nbd_unit, unit);
-			return;
-		}
+	sockets = g_nbd_ctl_steal_sockets(req, nsockets);
+	if (sockets == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		return;
 	}
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
 	sc->sc_host = strdup(host, M_GEOM);
