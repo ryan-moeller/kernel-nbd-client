@@ -244,7 +244,7 @@ nbd_inflight_free_mext(struct mbuf *m)
 {
 	struct nbd_inflight *ni = m->m_ext.ext_arg1;
 
-	G_NBD_LOGREQ(2, ni->ni_bio, "%s", __func__);
+	G_NBD_LOGREQ(G_NBD_TRACE, ni->ni_bio, "%s", __func__);
 	nbd_inflight_deliver(ni, 0);
 }
 
