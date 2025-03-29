@@ -24,6 +24,7 @@ task:
     PATH: /usr/local/sbin:${PATH}
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
   build_setup_script:
+    - mount >&2
     - mkdir ${WD}
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel-dbg.txz
     - tar xf ${WD}/kernel-dbg.txz -C / && rm ${WD}/kernel-dbg.txz
@@ -43,7 +44,7 @@ task:
     - tail -F -n +1 /var/log/messages
   load_script:
     - gnbd load
-    - sysctl kern.geom.nbd.debug=1
+    - sysctl kern.geom.nbd.debug=2
     - sysctl kern.ipc.tls.enable=1
   ca_info_file:
     path: ${WD}/ca.info
