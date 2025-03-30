@@ -602,6 +602,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	size_t available, expected;
 	int flags, error;
 
+	G_NBD_DEBUG(G_NBD_TRACE, "%s len=%zu", __func__, len);
 	m = NULL;
 	while (len > 0) {
 		SOCK_RECVBUF_LOCK(so);
