@@ -324,10 +324,18 @@ for sc, instance in pairs(instances) do
 		local seq = nc:GetChildMemberWithName("nc_seq")
 		local socket = nc:GetChildMemberWithName("nc_socket")
 		print(state, seq)
-		print(frames.sender:GetThread())
-		print(frames.sender)
-		print(frames.receiver:GetThread())
-		print(frames.receiver)
+		if frames.sender then
+			print(frames.sender:GetThread())
+			print(frames.sender)
+		else
+			print("no sender thread")
+		end
+		if frames.receiver then
+			print(frames.receiver:GetThread())
+			print(frames.receiver)
+		else
+			print("no receiver thread")
+		end
 		print(socket_summary(socket))
 		for ni in iter_inflight(nc) do
 			print(ni:Dereference())
