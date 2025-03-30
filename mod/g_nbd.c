@@ -1228,7 +1228,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	struct g_geom *gp;
 	struct g_provider *pp;
 	intmax_t *cp;
-	size_t limit, maxsz;
+	size_t limit, maxsz, minspace;
 	int unit, nsockets;
 
 	g_topology_assert();
@@ -1326,6 +1326,19 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		free_unr(g_nbd_unit, unit);
 		gctl_error(req, "Invalid 'maximum_payload' argument.");
 		return;
+	}
+	minspace = sizeof(struct nbd_request) + maxsz;
+	if (sendspace < minspace) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace -> %zu",
+		    minspace);
+		sendspace = minspace;
+	}
+	/* TODO: support structured replies */
+	minspace = sizeof(struct nbd_simple_reply) + maxsz;
+	if (recvspace < minspace) {
+		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace -> %zu",
+		    minspace);
+		recvspace = minspace;
 	}
 	cp = gctl_get_paraml(req, "connections", sizeof(*cp));
 	if (cp == NULL) {
