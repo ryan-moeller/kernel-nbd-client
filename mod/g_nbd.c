@@ -144,6 +144,7 @@ struct g_nbd_softc {
 	SLIST_HEAD(, nbd_conn)	sc_connections;
 	u_int		sc_nconns;
 	struct mtx	sc_conns_mtx;
+	bool		sc_flushing;
 	struct sx	sc_flush_lock;
 };
 
@@ -215,12 +216,15 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
-	switch (ni->ni_bio->bio_cmd) {
-	case BIO_DELETE:
-	case BIO_WRITE:
-		wakeup_one(ni);
+	if (atomic_load_bool(&nc->nc_softc->sc_flushing)) {
+		switch (ni->ni_bio->bio_cmd) {
+		case BIO_DELETE:
+		case BIO_WRITE:
+			wakeup_one(ni);
+		}
 	}
-	if (last)
+	if (last && atomic_load_int(&nc->nc_state)
+	    == NBD_CONN_SOFT_DISCONNECTING)
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
 	    last ? "true" : "false");
@@ -579,14 +583,15 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 	}
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
-	if (ni != NULL) {
+	if (ni != NULL && atomic_load_bool(&nc->nc_softc->sc_flushing)) {
 		switch (ni->ni_bio->bio_cmd) {
 		case BIO_DELETE:
 		case BIO_WRITE:
 			wakeup_one(ni);
 		}
 	}
-	if (last)
+	if (last && atomic_load_int(&nc->nc_state)
+	    == NBD_CONN_SOFT_DISCONNECTING)
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
 	    last ? "true" : "false");
@@ -751,6 +756,7 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct nbd_inflight *ni;
 
 	mtx_lock(&sc->sc_conns_mtx);
+	atomic_store_bool(&sc->sc_flushing, true);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 		mtx_lock(&nc->nc_inflight_mtx);
 restart:
@@ -766,6 +772,7 @@ restart:
 		}
 		mtx_unlock(&nc->nc_inflight_mtx);
 	}
+	atomic_store_bool(&sc->sc_flushing, false);
 	mtx_unlock(&sc->sc_conns_mtx);
 }
 
