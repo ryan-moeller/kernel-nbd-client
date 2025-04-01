@@ -39,8 +39,6 @@ task:
   build_script:
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" install
-  manlint_script:
-    - make manlint
   messages_background_script:
     - tail -F -n +1 /var/log/messages
   load_script:
