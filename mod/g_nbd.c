@@ -783,7 +783,7 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 
 	SOCK_SENDBUF_LOCK_ASSERT(so);
 
-	if (atomic_load_int(&nc->nc_state) != NBD_CONN_HARD_DISCONNECTING) {
+	if (atomic_load_int(&nc->nc_state) != NBD_CONN_SOFT_DISCONNECTING) {
 		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
 		return (false);
