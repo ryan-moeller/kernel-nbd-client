@@ -692,7 +692,15 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 		while (uio.uio_resid > 0) {
 			struct mbuf *m1;
 
-			flags = MSG_DONTWAIT;
+			/*
+			 * XXX: With MSG_TLSAPPDATA, soreceive() will return
+			 * ENXIO when a TLS alert record is received.  This
+			 * would have to be decoded by userland.  We will
+			 * treat it as a fatal error, which it probably is.
+			 * The details of the error will be lost, as we do not
+			 * have a userland daemon to understand it.
+			 */
+			flags = MSG_DONTWAIT | MSG_TLSAPPDATA;
 			error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
 			if (error != 0) {
 				G_NBD_DEBUG(G_NBD_ERROR,
