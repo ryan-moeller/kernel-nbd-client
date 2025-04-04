@@ -9,10 +9,10 @@ task:
     #    image_family: freebsd-13-5
     #  env:
     #    ARCHIVES_PATH: releases/amd64/13.5-RELEASE
-    - freebsd_instance:
-        image_family: freebsd-14-2
-      env:
-        ARCHIVES_PATH: releases/amd64/14.2-RELEASE
+    #- freebsd_instance:
+    #    image_family: freebsd-14-2
+    #  env:
+    #    ARCHIVES_PATH: releases/amd64/14.2-RELEASE
     - freebsd_instance:
         image_family: freebsd-15-0-snap
       env:
@@ -41,10 +41,23 @@ task:
     - eval make ${DEBUG_ARGS} install
   messages_background_script:
     - tail -F /var/log/messages
+  top_background_script:
+    - top -SHIPnz -s 60 -d infinity
+  netstat_background_script:
+    - netstat -w 60 -I lo0 -dnh
   load_script:
     - gnbd load
     - sysctl kern.geom.nbd.debug=2
     - sysctl kern.ipc.tls.enable=1
+  lldb_background_script:
+    - while sleep 60; do
+        echo;
+        netstat -Q;
+        gnbd list || true;
+        sysctl kern.geom.nbd || true;
+        lldb -b -o "script -l lua -- dofile 'gnbd.lua'"
+          -c /dev/mem /boot/kernel/kernel;
+      done
   ca_info_file:
     path: ${WD}/ca.info
     from_contents: |
@@ -106,7 +119,10 @@ task:
     - git -C ${WD} clone https://github.com/NetworkBlockDevice/nbd.git
     - git -C ${WD}/nbd checkout 7a64238499823456bb83cdbfe6811f5db468b35b
     - git -C ${WD}/nbd apply ${CIRRUS_WORKING_DIR}/nbd.patch
-    - cd ${WD}/nbd && ./autogen.sh && ./configure && make -j${CIRRUS_CPU}
+    - cd ${WD}/nbd
+      && ./autogen.sh
+      && ./configure --enable-debug
+      && make -j${CIRRUS_CPU}
     # Make a memory disk to serve.
     - mdconfig -a -t swap -s 4g
       | xargs -I @ echo MD=@ | tee -a ${CIRRUS_ENV} >&2
@@ -132,10 +148,13 @@ task:
     - mkdir traces
     - mount -t tmpfs tmp ./traces
     - kldload dtraceall
+  debug1_script:
+    - df -h >&2
+    - swapinfo -h >&2
   trace_connect_notls_script:
     - gnbd connect -c 4 -n ${MD} localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
-  trace_notls_script:
+  trace_notls_32_4k_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=32 --bs=4k --filename=/dev/${NBD}
           --output=./traces/notls-32-4k.fio.json --output-format=json+"
@@ -146,6 +165,10 @@ task:
     - flamegraph.pl ./traces/notls-32-4k.collapsedstack.txt
       > ./traces/notls-32-4k.svg
     - rm ./traces/dtrace.stacks
+  debug1b_script:
+    - df -h >&2
+    - swapinfo -h >&2
+  trace_notls_4_1m_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=4 --bs=1m --filename=/dev/${NBD}
           --output=./traces/notls-4-1m.fio.json --output-format=json+"
@@ -156,8 +179,15 @@ task:
     - flamegraph.pl ./traces/notls-4-1m.collapsedstack.txt
       > ./traces/notls-4-1m.svg
     - rm ./traces/dtrace.stacks
+  debug_1c_script:
+    - df -h >&2
+    - swapinfo -h >&2
+  trace_disconnect_notls_script:
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
+  debug2_script:
+    - df -h >&2
+    - swapinfo -h >&2
   trace_connect_tls_script:
     - gnbd connect -c 4 -n ${MD}
       -A ${WD}/cacert.pem
@@ -165,7 +195,7 @@ task:
       -K ${WD}/clientkey.pem
       localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
-  trace_tls_script:
+  trace_tls_32_4k_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=32 --bs=4k --filename=/dev/${NBD}
           --output=./traces/tls-32-4k.fio.json --output-format=json+"
@@ -176,9 +206,13 @@ task:
     - flamegraph.pl ./traces/tls-32-4k.collapsedstack.txt
       > ./traces/tls-32-4k.svg
     - rm ./traces/dtrace.stacks
+  debug2b_script:
+    - df -h >&2
+    - swapinfo -h >&2
+  trace_tls_4_1m_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=4 --bs=1m --filename=/dev/${NBD}
-          --output=./traces/tls-4-1m.fio.json --output-format=json+"
+          --output=./traces/tls-4-1m --output-format=json+"
       -n 'profile-197 /arg0/ { @[stack()] = count(); }'
       -o ./traces/dtrace.stacks
     - stackcollapse.pl ./traces/dtrace.stacks
@@ -186,15 +220,21 @@ task:
     - flamegraph.pl ./traces/tls-4-1m.collapsedstack.txt
       > ./traces/tls-4-1m.svg
     - rm ./traces/dtrace.stacks
+  debug2c_script:
+    - df -h >&2
+    - swapinfo -h >&2
+  trace_disconnect_notls_script:
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
+  fio_artifacts:
+    path: "./traces/*.fio.json"
   trace_artifacts:
     path: "./traces/*.collapsedstack.txt"
-  fio_artifacts:
-    path: "./traces/*.json"
   svg_artifacts:
     path: "./traces/*.svg"
   debug_script:
+    - df -h >&2
+    - swapinfo -h >&2
     - dmesg >&2
     - vmstat -z >&2
     - vmstat -m >&2
