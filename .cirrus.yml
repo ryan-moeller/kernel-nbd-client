@@ -41,12 +41,31 @@ task:
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" install
   messages_background_script:
     - tail -F -n +1 /var/log/messages
+  top_background_script:
+    - top -SHIPnz -s 60 -d infinity
+  netstat_background_script:
+    - netstat -w 60 -I lo0 -dnh
   load_script:
     - gnbd load
     - sysctl kern.geom.nbd.debug=1
     - sysctl kern.ipc.tls.enable=1
     # Avoid IP queue drops.
     - sysctl net.inet.ip.intr_queue_maxlen=`sysctl -n net.isr.maxqlimit`
+  stats_background_script:
+    - netstat -Q
+    - sysctl kern.ipc.tls
+    - while sleep 60; do
+        echo;
+        netstat -Q;
+        netstat -a4 | awk 'NR < 3 || /10809/';
+        gnbd list;
+        sysctl kern.geom.nbd;
+        sysctl kern.ipc.tls.stats;
+        sysctl dev.isal.0.stats;
+        sysctl kern.ipc.aio;
+        sysctl vfs.aio;
+        lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel;
+      done
   ca_info_file:
     path: ${WD}/ca.info
     from_contents: |
@@ -249,6 +268,8 @@ task:
   svg_artifacts:
     path: "./traces/*.svg"
   debug_script:
+    - df -h >&2
+    - swapinfo -h >&2
     - dmesg >&2
     - vmstat -z >&2
     - vmstat -m >&2
