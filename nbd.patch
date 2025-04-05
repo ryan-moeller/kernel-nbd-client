@@ -88,27 +88,15 @@ index 5adc670..84c9cf0 100644
  AC_OUTPUT
  
 diff --git a/nbd-server.c b/nbd-server.c
-index 92fd141..086bb28 100644
+index 92fd141..b6ccc41 100644
 --- a/nbd-server.c
 +++ b/nbd-server.c
-@@ -55,18 +55,17 @@
+@@ -55,6 +55,8 @@
   *	Suriya Soutmun <darksolar@gmail.com>
   */
  
-+#include <sys/param.h>
++#include <sys/cdefs.h>
 +
  /* Includes LFS defines, which defines behaviours of some of the following
   * headers, so must come before those */
  #include "lfs.h"
- #define _DEFAULT_SOURCE
- #define _XOPEN_SOURCE 500 /* to get pread/pwrite */
--#if NEED_BSD_SOURCE
- #define _BSD_SOURCE /* to get DT_* macros on some platforms */
--#endif
- #define _DARWIN_C_SOURCE /* to get DT_* macros on OS X */
- 
- #include <assert.h>
--#include <sys/types.h>
- #include <sys/socket.h>
- #include <sys/stat.h>
- #include <sys/select.h>
