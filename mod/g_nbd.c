@@ -1164,7 +1164,8 @@ nbd_conn_soupcall_snd(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
-	if (sowriteable(so))
+	if (sowriteable(so) || so->so_error != 0 ||
+	    (so->so_snd.sb_flags & SBS_CANTSENDMORE) != 0)
 		cv_signal(&nc->nc_send_cv);
 	return (SU_OK);
 }
@@ -1174,7 +1175,8 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
-	if (soreadable(so))
+	if (soreadable(so) || so->so_error != 0 || so->so_rerror != 0 ||
+	    (so->so_rcv.sb_flags & SBS_CANTRCVMORE) != 0)
 		cv_signal(&nc->nc_receive_cv);
 	return (SU_OK);
 }
