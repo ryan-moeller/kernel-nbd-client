@@ -703,7 +703,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				    "%s soreceive failed (%d)", __func__,
 				    error);
 				if (error != ENOMEM && error != EINTR &&
-				    error != ERESTART && error != EAGAIN)
+				    error != ERESTART && error != EWOULDBLOCK)
 					nbd_conn_degrade_state(nc,
 					    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
