@@ -608,10 +608,6 @@ nbd_conn_recv_ok(struct nbd_conn *nc, struct bio *bp)
 		G_NBD_LOGREQ(G_NBD_WARN, bp, "so_rerror=%d", so->so_rerror);
 		return (false);
 	}
-	if ((so->so_rcv.sb_state & SBS_CANTRCVMORE) != 0) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot receive more");
-		return (false);
-	}
 	return (true);
 }
 
@@ -668,7 +664,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			return (ENXIO);
 		}
 		/*
-		 * Set this here so we can use soreadable() below.  We don't
+		 * Set this here so we can use soreadabledata() below.  We don't
 		 * have to worry about spurious signals from the socket upcall,
 		 * as we are the only potential waiter on the cv.
 		 */
@@ -679,7 +675,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			cv_wait(&nc->nc_receive_cv, SOCK_RECVBUF_MTX(so));
 			available = sbavail(&so->so_rcv);
 		}
-		readable = soreadable(so);
+		readable = soreadabledata(so);
 		/*
 		 * We won't need a signal from the upcall from here on.
 		 */
@@ -1175,8 +1171,7 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
-	if (soreadable(so) || so->so_error != 0 || so->so_rerror != 0 ||
-	    (so->so_rcv.sb_flags & SBS_CANTRCVMORE) != 0)
+	if (soreadabledata(so) || so->so_error != 0 || so->so_rerror != 0)
 		cv_signal(&nc->nc_receive_cv);
 	return (SU_OK);
 }
