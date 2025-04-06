@@ -29,14 +29,14 @@
 #include <sys/sysctl.h>
 #include <sys/uio.h>
 
-#include <vm/uma.h>
-#include <vm/vm_page.h>
-
-#include <machine/atomic.h>
-
 #include <geom/geom.h>
 #include <geom/geom_dbg.h>
 #include <geom/geom_disk.h>
+
+#include <machine/atomic.h>
+
+#include <vm/uma.h>
+#include <vm/vm_page.h>
 
 #include "g_nbd.h"
 #include "nbd-protocol.h"
