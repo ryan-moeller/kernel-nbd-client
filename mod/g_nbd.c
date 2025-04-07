@@ -546,10 +546,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 		if (__predict_false(error != 0)) {
 			G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)",
 			    __func__, error);
-			if (error != ENOMEM && error != EINTR &&
-			    error != ERESTART && error != EWOULDBLOCK)
-				nbd_conn_degrade_state(nc,
-				    NBD_CONN_HARD_DISCONNECTING);
+			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 			nbd_conn_remove_inflight_specific(nc, ni);
 			nbd_inflight_deliver(ni, error);
 			return;
@@ -705,10 +702,8 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				G_NBD_DEBUG(G_NBD_ERROR,
 				    "%s soreceive failed (%d)", __func__,
 				    error);
-				if (error != ENOMEM && error != EINTR &&
-				    error != ERESTART && error != EWOULDBLOCK)
-					nbd_conn_degrade_state(nc,
-					    NBD_CONN_HARD_DISCONNECTING);
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
 				return (error);
 			}
