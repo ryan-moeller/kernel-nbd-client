@@ -77,6 +77,7 @@ task:
       autotools
       bison
       docbook2X
+      isal-kmod
       git-lite
       glib
       gnutls
@@ -111,6 +112,8 @@ task:
     # Make a memory disk to serve.
     - mdconfig -a -t swap -s 4g
       | xargs -I @ echo MD=@ | tee -a ${CIRRUS_ENV} >&2
+    # Intelligent Storage Acceleration Library - faster ktls crypto routines
+    - kldload isal
   # Environment variables added by scripts aren't picked up by file
   # instructions, so we have to create the file in a script instead.
   test_server_config_script: |
