@@ -770,6 +770,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		size_t resid = bp->bio_length;
 
 		/* Perform the read in batches to limit the memory usage. */
+		/* TODO: this could be tunable, we are in m_free() a lot. */
 		do {
 			size_t limit = nc->nc_socket->so_rcv.sb_hiwat;
 			size_t len = resid;
