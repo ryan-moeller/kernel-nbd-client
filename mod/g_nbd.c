@@ -183,7 +183,7 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s cookie=%lu", __func__, nc->nc_seq);
 	ni = uma_zalloc(g_nbd_inflight_zone, M_NOWAIT | M_ZERO);
-	if (ni == NULL)
+	if (__predict_false(ni == NULL))
 		return (NULL);
 	ni->ni_bio = bp;
 	ni->ni_cookie = nc->nc_seq++;
@@ -204,15 +204,15 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
-	if (atomic_load_bool(&nc->nc_softc->sc_flushing)) {
+	if (__predict_false(atomic_load_bool(&nc->nc_softc->sc_flushing))) {
 		switch (ni->ni_bio->bio_cmd) {
 		case BIO_DELETE:
 		case BIO_WRITE:
 			wakeup_one(ni);
 		}
 	}
-	if (last && atomic_load_int(&nc->nc_state)
-	    == NBD_CONN_SOFT_DISCONNECTING)
+	if (__predict_false(last && atomic_load_int(&nc->nc_state)
+	    == NBD_CONN_SOFT_DISCONNECTING))
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
 	    last ? "true" : "false");
@@ -276,20 +276,21 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 {
 	struct socket *so = nc->nc_socket;
 
-	if (atomic_load_int(&nc->nc_state) != NBD_CONN_CONNECTED) {
+	if (__predict_false(atomic_load_int(&nc->nc_state) !=
+	    NBD_CONN_CONNECTED)) {
 		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
 		return (false);
 	}
-	if (so->so_error != 0) {
+	if (__predict_false(so->so_error != 0)) {
 		G_NBD_LOGREQ(G_NBD_WARN, bp, "so_error=%d", so->so_error);
 		return (false);
 	}
-	if ((so->so_state & SS_ISCONNECTED) == 0) {
+	if (__predict_false((so->so_state & SS_ISCONNECTED) == 0)) {
 		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "not connected");
 		return (false);
 	}
-	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0) {
+	if (__predict_false((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0)) {
 		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot send more");
 		return (false);
 	}
@@ -307,14 +308,14 @@ nbd_request_mbuf(bool tls, struct nbd_request **reqp)
 
 	if (tls) {
 		m = mb_alloc_ext_plus_pages(needed, M_NOWAIT);
-		if (m == NULL)
+		if (__predict_false(m == NULL))
 			return (NULL);
 		m->m_epg_last_len = needed;
 		m->m_ext.ext_size = PAGE_SIZE;
 		*reqp = (void *)PHYS_TO_DMAP(m->m_epg_pa[0]);
 	} else {
 		m = m_get(M_NOWAIT, MT_DATA);
-		if (m == NULL)
+		if (__predict_false(m == NULL))
 			return (NULL);
 		*reqp = mtod(m, void *);
 	}
@@ -357,7 +358,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 #else
 				    nbd_inflight_free_mext);
 #endif
-				if (d == NULL) {
+				if (__predict_false(d == NULL)) {
 					m_freem(m);
 					return (NULL);
 				}
@@ -405,7 +406,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 			len = MIN(resid, MBUF_PEXT_MAX_PGS * PAGE_SIZE);
 			len = MIN(len, g_nbd_tlsmax);
 			d = mb_alloc_ext_plus_pages(len, M_NOWAIT);
-			if (d == NULL) {
+			if (__predict_false(d == NULL)) {
 				m_freem(m);
 				return (NULL);
 			}
@@ -430,7 +431,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (notls)",
 		    __func__);
 		m = m_get(M_NOWAIT, MT_DATA);
-		if (m == NULL)
+		if (__predict_false(m == NULL))
 			return (NULL);
 		refcount_acquire(&ni->ni_refs);
 		m_extadd(m, bp->bio_data + start, len, nbd_inflight_free_mext,
@@ -460,7 +461,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
 	m = nbd_request_mbuf(tls, &req);
-	if (m == NULL) {
+	if (__predict_false(m == NULL)) {
 		nbd_conn_remove_inflight_specific(nc, ni);
 		nbd_inflight_deliver(ni, ENOMEM);
 		return;
@@ -482,7 +483,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			struct mbuf *d;
 
 			d = nbd_write_mbufs(ni, tls, limit, &offset);
-			if (d == NULL) {
+			if (__predict_false(d == NULL)) {
 				m_free(m);
 				nbd_conn_remove_inflight_specific(nc, ni);
 				nbd_inflight_deliver(ni, ENOMEM);
@@ -498,7 +499,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 		MPASS(needed == m_length(m, NULL));
 		SOCK_SENDBUF_LOCK(so);
 		for (;;) {
-			if (!nbd_conn_send_ok(nc, bp)) {
+			if (__predict_false(!nbd_conn_send_ok(nc, bp))) {
 				SOCK_SENDBUF_UNLOCK(so);
 				G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
 				    __func__);
@@ -525,7 +526,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 		}
 		SOCK_SENDBUF_UNLOCK(so);
 		error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
-		if (error != 0) {
+		if (__predict_false(error != 0)) {
 			G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)",
 			    __func__, error);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
@@ -550,7 +551,7 @@ nbd_simple_reply_ntoh(struct nbd_simple_reply *reply)
 static inline bool
 nbd_simple_reply_is_valid(struct nbd_simple_reply *reply)
 {
-	if (reply->magic != NBD_SIMPLE_REPLY_MAGIC) {
+	if (__predict_false(reply->magic != NBD_SIMPLE_REPLY_MAGIC)) {
 		G_NBD_DEBUG(G_NBD_INFO, "magic=0x%08x != 0x%08x", reply->magic,
 		    NBD_SIMPLE_REPLY_MAGIC);
 		return (false);
@@ -573,16 +574,17 @@ nbd_conn_recv_ok(struct nbd_conn *nc)
 {
 	struct socket *so = nc->nc_socket;
 
-	if (atomic_load_int(&nc->nc_state) == NBD_CONN_HARD_DISCONNECTING) {
+	if (__predict_false(atomic_load_int(&nc->nc_state) ==
+	    NBD_CONN_HARD_DISCONNECTING)) {
 		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
 		    nbd_conn_state_str(nc->nc_state));
 		return (false);
 	}
-	if (so->so_error != 0) {
+	if (__predict_false(so->so_error != 0)) {
 		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
 		return (false);
 	}
-	if (so->so_rerror != 0) {
+	if (__predict_false(so->so_rerror != 0)) {
 		G_NBD_DEBUG(G_NBD_WARN, "so_rerror=%d", so->so_rerror);
 		return (false);
 	}
@@ -605,15 +607,16 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 	}
 	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
-	if (ni != NULL && atomic_load_bool(&nc->nc_softc->sc_flushing)) {
+	if (__predict_false(ni != NULL &&
+	    atomic_load_bool(&nc->nc_softc->sc_flushing))) {
 		switch (ni->ni_bio->bio_cmd) {
 		case BIO_DELETE:
 		case BIO_WRITE:
 			wakeup_one(ni);
 		}
 	}
-	if (last && atomic_load_int(&nc->nc_state)
-	    == NBD_CONN_SOFT_DISCONNECTING)
+	if (__predict_false(last && atomic_load_int(&nc->nc_state)
+	    == NBD_CONN_SOFT_DISCONNECTING))
 		wakeup_one(&nc->nc_inflight);
 	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
 	    last ? "true" : "false");
@@ -634,7 +637,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	while (len > 0) {
 		SOCK_RECVBUF_LOCK(so);
 		for (;;) {
-			if (!nbd_conn_recv_ok(nc)) {
+			if (__predict_false(!nbd_conn_recv_ok(nc))) {
 				SOCK_RECVBUF_UNLOCK(so);
 				G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting",
 				    __func__);
@@ -691,7 +694,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 		 */
 		flags = MSG_DONTWAIT | MSG_TLSAPPDATA;
 		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
-		if (error != 0) {
+		if (__predict_false(error != 0)) {
 			G_NBD_DEBUG(G_NBD_ERROR,
 			    "%s soreceive failed (%d)", __func__,
 			    error);
@@ -729,20 +732,20 @@ nbd_conn_recv(struct nbd_conn *nc)
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
 	error = nbd_conn_recv_mbufs(nc, sizeof(reply), &m);
-	if (error != 0)
+	if (__predict_false(error != 0))
 		return;
 	G_NBD_DEBUG(G_NBD_DEBUG0, "%s received reply", __func__);
 	m_copydata(m, 0, sizeof(reply), (void *)&reply);
 	m_freem(m);
 	nbd_simple_reply_ntoh(&reply);
-	if (!nbd_simple_reply_is_valid(&reply)) {
+	if (__predict_false(!nbd_simple_reply_is_valid(&reply))) {
 		G_NBD_DEBUG(G_NBD_ERROR, "%s received invalid reply", __func__);
 		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 		return;
 	}
 	/* TODO: structured replies can have multiple replies per cookie */
 	ni = nbd_conn_remove_inflight(nc, reply.cookie);
-	if (ni == NULL) {
+	if (__predict_false(ni == NULL)) {
 		G_NBD_DEBUG(G_NBD_ERROR,
 		    "%s did not find inflight bio for cookie 0x%lx", __func__,
 		    reply.cookie);
@@ -750,7 +753,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	bp = ni->ni_bio;
-	if (reply.error != 0) {
+	if (__predict_false(reply.error != 0)) {
 		G_NBD_LOGREQ(G_NBD_WARN, bp,
 		    "%s received reply with error (%d)", __func__, reply.error);
 		if (reply.error == NBD_ESHUTDOWN)
@@ -771,7 +774,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 			if (len > limit)
 				len = trunc_page(limit);
 			error = nbd_conn_recv_mbufs(nc, len, &m);
-			if (error != 0) {
+			if (__predict_false(error != 0)) {
 				nbd_inflight_deliver(ni, error);
 				return;
 			}
@@ -857,7 +860,7 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
 		return (false);
 	}
-	if ((so->so_state & SS_ISCONNECTED) == 0) {
+	if (__predict_false((so->so_state & SS_ISCONNECTED) == 0)) {
 		G_NBD_DEBUG(G_NBD_DEBUG0, "not connected");
 		return (false);
 	}
@@ -1054,7 +1057,8 @@ nbd_conn_sender(void *arg)
 	sched_prio(curthread, PRIBIO);
 	thread_unlock(curthread);
 
-	while (atomic_load_int(&nc->nc_state) == NBD_CONN_CONNECTED) {
+	while (__predict_true(atomic_load_int(&nc->nc_state)
+	    == NBD_CONN_CONNECTED)) {
 		/*
 		 * TODO: we're taking work before we know whether we will be
 		 * able to complete it (due to lack of buffer space).  There
@@ -1083,7 +1087,7 @@ nbd_conn_sender(void *arg)
 			 * request to avoid racing with the receiver thread.
 			 */
 			ni = nbd_conn_enqueue_inflight(nc, bp);
-			if (ni == NULL) {
+			if (__predict_false(ni == NULL)) {
 				sx_xunlock(&sc->sc_flush_lock);
 				g_io_deliver(bp, ENOMEM);
 				continue;
@@ -1105,7 +1109,7 @@ nbd_conn_sender(void *arg)
 				sx_sunlock(&sc->sc_flush_lock);
 			} else
 				ni = nbd_conn_enqueue_inflight(nc, bp);
-			if (ni == NULL) {
+			if (__predict_false(ni == NULL)) {
 				g_io_deliver(bp, ENOMEM);
 				continue;
 			}
@@ -1142,7 +1146,8 @@ nbd_conn_receiver(void *arg)
 	sched_prio(curthread, PSOCK); /* XXX: or PRIBIO? */
 	thread_unlock(curthread);
 
-	while (atomic_load_int(&nc->nc_state) != NBD_CONN_HARD_DISCONNECTING)
+	while (__predict_true(atomic_load_int(&nc->nc_state) !=
+	    NBD_CONN_HARD_DISCONNECTING))
 		nbd_conn_recv(nc);
 	socantsendmore(so);
 	cv_signal(&nc->nc_send_cv);
@@ -1859,7 +1864,7 @@ g_nbd_handleattr_ident(struct g_nbd_softc *sc, struct bio *bp)
 		error = g_nbd_format_ident_name(sc, bp);
 		break;
 	}
-	if (error == 0)
+	if (__predict_true(error == 0))
 		bp->bio_completed = bp->bio_length;
 	g_io_deliver(bp, error);
 	return (1);
@@ -1874,7 +1879,7 @@ g_nbd_start(struct bio *bp)
 	off_t offset;
 
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
-	if (sc == NULL) {
+	if (__predict_false(sc == NULL)) {
 		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s softc NULL", __func__);
 		g_io_deliver(bp, ENXIO);
 		return;
@@ -1884,7 +1889,7 @@ g_nbd_start(struct bio *bp)
 	 * classes never check for it.  Assume we will never see a bio
 	 * with it for now.
 	 */
-	if ((bp->bio_flags & BIO_VLIST) != 0) {
+	if (__predict_false((bp->bio_flags & BIO_VLIST) != 0)) {
 		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s BIO_VLIST not implemented",
 		    __func__);
 		g_io_deliver(bp, EFAULT);
@@ -1921,7 +1926,7 @@ g_nbd_start(struct bio *bp)
 	case BIO_READ:
 	case BIO_WRITE:
 		bp1 = g_clone_bio(bp);
-		if (bp1 == NULL) {
+		if (__predict_false(bp1 == NULL)) {
 			g_io_deliver(bp, ENOMEM);
 			return;
 		}
@@ -1932,7 +1937,7 @@ g_nbd_start(struct bio *bp)
 				offset += bp1->bio_length;
 				/* Grab next bio now to avoid race. */
 				bp2 = g_clone_bio(bp);
-				if (bp2 == NULL)
+				if (__predict_false(bp2 == NULL))
 					bp->bio_error = ENOMEM;
 			}
 			bp1->bio_done = g_nbd_done;
