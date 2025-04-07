@@ -900,6 +900,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 		MPASS(so->so_snd.sb_lowat <= so->so_snd.sb_hiwat);
 		cv_wait(&nc->nc_send_cv, SOCK_SENDBUF_MTX(so));
 	}
+	so->so_snd.sb_lowat = so->so_snd.sb_hiwat + 1;
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
 	if (error != 0) {
