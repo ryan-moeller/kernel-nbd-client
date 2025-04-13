@@ -315,6 +315,19 @@ function bio_summary(bp)
 	return string.format("bio[%s<%s>%d:%d]", cmd, flags, offset, length)
 end
 
+function thread_summary(frame)
+	local thread = frame:GetThread()
+	local lines = {}
+	table.insert(lines, tostring(thread))
+	table.insert(lines, tostring(frame))
+	table.insert(lines, "Full Backtrace:")
+	for i = 0, thread:GetNumFrames() - 1 do
+		local frame = thread:GetFrameAtIndex(i)
+		table.insert(lines, tostring(frame))
+	end
+	return table.concat(lines, "\n")
+end
+
 instances = find_gnbd_instances()
 for sc, instance in pairs(instances) do
 	print(sc)
@@ -325,14 +338,12 @@ for sc, instance in pairs(instances) do
 		local socket = nc:GetChildMemberWithName("nc_socket")
 		print(state, seq)
 		if frames.sender then
-			print(frames.sender:GetThread())
-			print(frames.sender)
+			print(thread_summary(frames.sender))
 		else
 			print("no sender thread")
 		end
 		if frames.receiver then
-			print(frames.receiver:GetThread())
-			print(frames.receiver)
+			print(thread_summary(frames.receiver))
 		else
 			print("no receiver thread")
 		end
