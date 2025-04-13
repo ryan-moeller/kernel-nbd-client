@@ -163,18 +163,22 @@ A manual page can be found in lib/gnbd.8, or installed as gnbd(8).
 Assuming FreeBSD sources are already installed in /usr/src, this example will
 walk through the steps to set up a local NBD server and client for testing.
 
-First, clone the repo:
+First, clone the repo and build the client:
 
 ```
 # pkg install git
 # git clone https://github.com/ryan-moeller/kernel-nbd-client.git
+# cd kernel-nbd-client
+# make
+# make install
+# cd -
 ```
 
 Now, we'll generate the TLS certificates:
 
 ```
 # pkg install gnutls
-# certtool --generate-privkey > cakey.pem
+# certtool --generate-privkey > ca-key.pem
 # cat > ca.info <<EOF
 cn = testing nbd client
 ca
@@ -182,10 +186,10 @@ cert_signing_key
 EOF
 # certtool \
     --generate-self-signed \
-    --load-privkey cakey.pem \
+    --load-privkey ca-key.pem \
     --template ca.info \
-    --outfile cacert.pem
-# certtool --generate-privkey > serverkey.pem
+    --outfile ca-cert.pem
+# certtool --generate-privkey > server-key.pem
 # cat > server.info <<EOF
 organization = testing nbd client
 cn = localhost
@@ -195,12 +199,12 @@ signing_key
 EOF
 # certtool \
     --generate-certificate \
-    --load-ca-certificate cacert.pem \
-    --load-ca-privkey cakey.pem \
-    --load-privkey serverkey.pem \
+    --load-ca-certificate ca-cert.pem \
+    --load-ca-privkey ca-key.pem \
+    --load-privkey server-key.pem \
     --template server.info \
-    --outfile servercert.pem
-# certtool --generate-privkey > clientkey.pem
+    --outfile server-cert.pem
+# certtool --generate-privkey > client-key.pem
 # cat > client.info <<EOF
 country = US
 state = Florida
@@ -213,54 +217,19 @@ signing_key
 EOF
 # certtool \
     --generate-certificate \
-    --load-ca-certificate cacert.pem \
-    --load-ca-privkey cakey.pem \
-    --load-privkey clientkey.pem \
+    --load-ca-certificate ca-cert.pem \
+    --load-ca-privkey ca-key.pem \
+    --load-privkey client-key.pem \
     --template client.info \
-    --outfile clientcert.pem
+    --outfile client-cert.pem
 ```
 
-Then, set up nbd-server.  The FreeBSD port is outdated and buggy, so we'll build
-it ourselves.  More likely people will be connecting to an existing Linux
-server, but to keep the example on one machine we must do a little patching.
-At the time of writing the latest release is 3.26.1 and it has several bugs in
-the server code which have been patched on the master branch, so we will clone
-the repository from GitHub and checkout a known good commit, then patch a few
-things so we can build only the nbd-server program on FreeBSD:
+Then, set up the server.  The FreeBSD nbd-server port is outdated and buggy,
+so we'll use nbdkit.  We'll start the server with a 4 GiB memory disk:
 
 ```
-# pkg install autotools autoconf-archive bison docbook2X glib pkgconf
-# git clone https://github.com/NetworkBlockDevice/nbd.git
-# cd nbd
-# git checkout 7a64238499823456bb83cdbfe6811f5db468b35b
-# git apply ../kernel-nbd-client/nbd.patch
-# ./autogen.sh
-# ./configure
-# make
-# cd ..
-# cat > nbdconfig <<EOF
-[generic]
-cacertfile = ${PWD}/cacert.pem
-certfile = ${PWD}/servercert.pem
-keyfile = ${PWD}/serverkey.pem
-EOF
-```
-
-Now, we'll build the client code:
-
-```
-# cd kernel-nbd-client
-# make
-# make install
-# cd ..
-```
-
-To minimize filesystem overhead for the backing file, attach a memory disk for
-for the server to export.  Then we can start the server:
-
-```
-# MD=$(mdconfig -a -t swap -s 4g)
-# ./nbd/nbd-server 10809 /dev/${MD} -C ./nbdconfig
+# pkg install nbdkit
+# nbdkit --tls-certificates ${PWD} memory 4G
 ```
 
 With the server running, we can connect the client and run some disk tests:
@@ -315,8 +284,7 @@ Finally, the cleanup:
 ```
 # gnbd disconnect nbd0
 # gnbd unload
-# pkill nbd-server
-# mdconfig -d -u ${MD}
+# pkill nbdkit
 ```
 
 ## Debugging

@@ -21,6 +21,7 @@ task:
   stateful: false
   env:
     WD: /tmp/wd
+    PATH: /usr/local/sbin:${PATH}
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
   build_setup_script:
     - mkdir ${WD}
@@ -73,66 +74,41 @@ task:
       signing_key
   test_setup_script:
     - pkg install -y
-      autoconf-archive
-      autotools
-      bison
-      docbook2X
       isal-kmod
-      git-lite
-      glib
       gnutls
-      pkgconf
+      nbdkit
     # Certificate Authority
-    - certtool --generate-privkey > ${WD}/cakey.pem
+    - certtool --generate-privkey > ${WD}/ca-key.pem
     - certtool --generate-self-signed
-      --load-privkey ${WD}/cakey.pem
+      --load-privkey ${WD}/ca-key.pem
       --template ${WD}/ca.info
-      --outfile ${WD}/cacert.pem
+      --outfile ${WD}/ca-cert.pem
     # Server
-    - certtool --generate-privkey > ${WD}/serverkey.pem
+    - certtool --generate-privkey > ${WD}/server-key.pem
     - certtool --generate-certificate
-      --load-ca-certificate ${WD}/cacert.pem
-      --load-ca-privkey ${WD}/cakey.pem
-      --load-privkey ${WD}/serverkey.pem
+      --load-ca-certificate ${WD}/ca-cert.pem
+      --load-ca-privkey ${WD}/ca-key.pem
+      --load-privkey ${WD}/server-key.pem
       --template ${WD}/server.info
-      --outfile ${WD}/servercert.pem
+      --outfile ${WD}/server-cert.pem
     # Client
-    - certtool --generate-privkey > ${WD}/clientkey.pem
+    - certtool --generate-privkey > ${WD}/client-key.pem
     - certtool --generate-certificate
-      --load-ca-certificate ${WD}/cacert.pem
-      --load-ca-privkey ${WD}/cakey.pem
-      --load-privkey ${WD}/clientkey.pem
+      --load-ca-certificate ${WD}/ca-cert.pem
+      --load-ca-privkey ${WD}/ca-key.pem
+      --load-privkey ${WD}/client-key.pem
       --template ${WD}/client.info
-      --outfile ${WD}/clientcert.pem
-    # Build a working recent version of nbd-server.
-    - git -C ${WD} clone https://github.com/NetworkBlockDevice/nbd.git
-    - git -C ${WD}/nbd checkout 7a64238499823456bb83cdbfe6811f5db468b35b
-    - git -C ${WD}/nbd apply ${CIRRUS_WORKING_DIR}/nbd.patch
-    - cd ${WD}/nbd && ./autogen.sh && ./configure && make -j${CIRRUS_CPU}
-    # Make a memory disk to serve.
-    - mdconfig -a -t swap -s 4g
-      | xargs -I @ echo MD=@ | tee -a ${CIRRUS_ENV} >&2
+      --outfile ${WD}/client-cert.pem
     # Intelligent Storage Acceleration Library - faster ktls crypto routines
     - kldload isal
-  # Environment variables added by scripts aren't picked up by file
-  # instructions, so we have to create the file in a script instead.
-  test_server_config_script: |
-    cat >> ${WD}/nbdconfig <<EOF
-    [generic]
-    listenaddr = localhost
-    cacertfile = ${WD}/cacert.pem
-    certfile = ${WD}/servercert.pem
-    keyfile = ${WD}/serverkey.pem
-
-    [${MD}]
-    exportname = /dev/${MD}
-    flush = true
-    trim = true
-    EOF
   test_server_background_script:
-    - ${WD}/nbd/nbd-server -C ${WD}/nbdconfig
+    - nbdkit
+      --no-fork
+      --threads ${CIRRUS_CPU}
+      --tls-certificates ${WD}
+      memory 4G
   test_connect_notls_script:
-    - gnbd connect -n ${MD} localhost
+    - gnbd connect localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   test_notls_script:
     # Test with 1 connection.
@@ -159,10 +135,10 @@ task:
     # Unset the NBD variable in the env.
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   test_connect_tls_script:
-    - gnbd connect -n ${MD}
-      -A ${WD}/cacert.pem
-      -C ${WD}/clientcert.pem
-      -K ${WD}/clientkey.pem
+    - gnbd connect
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
       localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   test_tls_script:
@@ -176,17 +152,17 @@ task:
     - diskinfo -twic ${NBD}
     # Test with 4 conections (scaling up).
     - gnbd scale -c 4
-      -A ${WD}/cacert.pem
-      -C ${WD}/clientcert.pem
-      -K ${WD}/clientkey.pem
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
       ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)4$"
     - diskinfo -twic ${NBD}
     # Test with 2 connections (scaling down).
     - gnbd scale -c 2
-      -A ${WD}/cacert.pem
-      -C ${WD}/clientcert.pem
-      -K ${WD}/clientkey.pem
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
       ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
     - diskinfo -twic ${NBD}
@@ -203,7 +179,7 @@ task:
     - mount -t tmpfs tmp ./traces
     - kldload dtraceall
   trace_connect_notls_script:
-    - gnbd connect -c 4 -n ${MD} localhost
+    - gnbd connect -c 4 localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   trace_notls_script:
     - dtrace -x stackframes=100
@@ -229,10 +205,10 @@ task:
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   trace_connect_tls_script:
-    - gnbd connect -c 4 -n ${MD}
-      -A ${WD}/cacert.pem
-      -C ${WD}/clientcert.pem
-      -K ${WD}/clientkey.pem
+    - gnbd connect -c 4
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
       localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   trace_tls_script:
