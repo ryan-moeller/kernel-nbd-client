@@ -234,10 +234,10 @@ task:
     - rm ./traces/dtrace.stacks
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
+  fio_artifacts:
+    path: "./traces/*.fio.json"
   trace_artifacts:
     path: "./traces/*.collapsedstack.txt"
-  fio_artifacts:
-    path: "./traces/*.json"
   svg_artifacts:
     path: "./traces/*.svg"
   debug_script:
