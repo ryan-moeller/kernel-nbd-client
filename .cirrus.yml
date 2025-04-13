@@ -42,7 +42,7 @@ task:
   manlint_script:
     - make manlint
   messages_background_script:
-    - tail -F /var/log/messages
+    - tail -F -n +1 /var/log/messages
   load_script:
     - gnbd load
     - sysctl kern.geom.nbd.debug=1
