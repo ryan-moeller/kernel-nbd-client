@@ -57,7 +57,7 @@ task:
         gnbd list || true;
         sysctl kern.geom.nbd || true;
         sysctl kern.ipc.tls || true;
-        sysctl dev.isal.stats || true
+        sysctl dev.isal.0.stats || true
         lldb -b -o "script -l lua -- dofile 'gnbd.lua'"
           -c /dev/mem /boot/kernel/kernel;
       done
