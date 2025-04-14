@@ -9,14 +9,14 @@ task:
     #    image_family: freebsd-13-5
     #  env:
     #    ARCHIVES_PATH: releases/amd64/13.5-RELEASE
-    #- freebsd_instance:
-    #    image_family: freebsd-14-2
-    #  env:
-    #    ARCHIVES_PATH: releases/amd64/14.2-RELEASE
     - freebsd_instance:
-        image_family: freebsd-15-0-snap
+        image_family: freebsd-14-2
       env:
-        ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
+        ARCHIVES_PATH: releases/amd64/14.2-RELEASE
+    #- freebsd_instance:
+    #    image_family: freebsd-15-0-snap
+    #  env:
+    #    ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
   name: ${ARCHIVES_PATH}
   stateful: false
   env:
