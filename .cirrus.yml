@@ -51,12 +51,13 @@ task:
     - sysctl kern.geom.nbd.debug=2
     - sysctl kern.ipc.tls.enable=1
   lldb_background_script:
+    - sysctl kern.ipc.tls || true
     - while sleep 60; do
         echo;
         netstat -Q;
         gnbd list || true;
         sysctl kern.geom.nbd || true;
-        sysctl kern.ipc.tls || true;
+        sysctl kern.ipc.tls.stats || true;
         sysctl dev.isal.0.stats || true
         lldb -b -o "script -l lua -- dofile 'gnbd.lua'"
           -c /dev/mem /boot/kernel/kernel;
@@ -121,18 +122,81 @@ task:
       --threads ${CIRRUS_CPU}
       --tls-certificates ${WD}
       memory 4G
+  test_connect_notls_script:
+    - gnbd connect localhost
+      | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
+  test_notls_script:
+    # Test with 1 connection.
+    - gnbd status
+    - gnbd status | egrep -q "^${NBD}(\s+)"
+    - gnbd list
+    - gnbd list ${NBD} | egrep -q "^Geom name:(\s+)${NBD}$"
+    - gnbd list ${NBD} | egrep -q "^TLS:(\s+)no$"
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)1$"
+    - diskinfo -twic ${NBD}
+    # Test with 4 conections (scaling up).
+    - gnbd scale -c 4 ${NBD}
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)4$"
+    - diskinfo -twic ${NBD}
+    # Test with 2 connections (scaling down).
+    - gnbd scale -c 2 ${NBD}
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
+    - diskinfo -twic ${NBD}
+    # Test the lldb script if we're on a debug build.
+    - test -z "${DEBUG_ARGS}"
+      || lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
+    # Clean up.
+    - gnbd disconnect ${NBD}
+    # Unset the NBD variable in the env.
+    - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
+  test_connect_tls_script:
+    - gnbd connect
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
+      localhost
+      | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
+  test_tls_script:
+    # Test with 1 connection.
+    - gnbd status
+    - gnbd status | egrep -q "^${NBD}(\s+)"
+    - gnbd list
+    - gnbd list ${NBD} | egrep -q "^Geom name:(\s+)${NBD}$"
+    - gnbd list ${NBD} | egrep -q "^TLS:(\s+)yes$"
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)1$"
+    - diskinfo -twic ${NBD}
+    # Test with 4 conections (scaling up).
+    - gnbd scale -c 4
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
+      ${NBD}
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)4$"
+    - diskinfo -twic ${NBD}
+    # Test with 2 connections (scaling down).
+    - gnbd scale -c 2
+      -A ${WD}/ca-cert.pem
+      -C ${WD}/client-cert.pem
+      -K ${WD}/client-key.pem
+      ${NBD}
+    - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
+    - diskinfo -twic ${NBD}
+    # Test the lldb script if we're on a debug build.
+    - test -z "${DEBUG_ARGS}"
+      || lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
+    # Clean up.
+    - gnbd disconnect ${NBD}
+    # Unset the NBD variable in the env.
+    - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   trace_setup_script:
     - pkg install -y fio flamegraph
     - mkdir traces
     - mount -t tmpfs tmp ./traces
     - kldload dtraceall
-  debug1_script:
-    - df -h >&2
-    - swapinfo -h >&2
   trace_connect_notls_script:
-    - gnbd connect localhost
+    - gnbd connect -c 4 localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
-  trace_notls_32_4k_script:
+  trace_notls_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=32 --bs=4k --filename=/dev/${NBD}
           --output=./traces/notls-32-4k.fio.json --output-format=json+"
@@ -143,10 +207,6 @@ task:
     - flamegraph.pl ./traces/notls-32-4k.collapsedstack.txt
       > ./traces/notls-32-4k.svg
     - rm ./traces/dtrace.stacks
-  debug1b_script:
-    - df -h >&2
-    - swapinfo -h >&2
-  trace_notls_4_1m_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=4 --bs=1m --filename=/dev/${NBD}
           --output=./traces/notls-4-1m.fio.json --output-format=json+"
@@ -157,23 +217,16 @@ task:
     - flamegraph.pl ./traces/notls-4-1m.collapsedstack.txt
       > ./traces/notls-4-1m.svg
     - rm ./traces/dtrace.stacks
-  debug_1c_script:
-    - df -h >&2
-    - swapinfo -h >&2
-  trace_disconnect_notls_script:
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
-  debug2_script:
-    - df -h >&2
-    - swapinfo -h >&2
   trace_connect_tls_script:
-    - gnbd connect
+    - gnbd connect -c 4
       -A ${WD}/ca-cert.pem
       -C ${WD}/client-cert.pem
       -K ${WD}/client-key.pem
       localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
-  trace_tls_32_4k_script:
+  trace_tls_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=32 --bs=4k --filename=/dev/${NBD}
           --output=./traces/tls-32-4k.fio.json --output-format=json+"
@@ -184,10 +237,6 @@ task:
     - flamegraph.pl ./traces/tls-32-4k.collapsedstack.txt
       > ./traces/tls-32-4k.svg
     - rm ./traces/dtrace.stacks
-  debug2b_script:
-    - df -h >&2
-    - swapinfo -h >&2
-  trace_tls_4_1m_script:
     - dtrace -x stackframes=100
       -c "fio ci.fio --iodepth=4 --bs=1m --filename=/dev/${NBD}
           --output=./traces/tls-4-1m.fio.json --output-format=json+"
@@ -198,10 +247,6 @@ task:
     - flamegraph.pl ./traces/tls-4-1m.collapsedstack.txt
       > ./traces/tls-4-1m.svg
     - rm ./traces/dtrace.stacks
-  debug2c_script:
-    - df -h >&2
-    - swapinfo -h >&2
-  trace_disconnect_tls_script:
     - gnbd disconnect ${NBD}
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
   fio_artifacts:
