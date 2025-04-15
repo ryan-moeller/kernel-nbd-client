@@ -449,6 +449,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 #ifdef INVARIANTS
 			counter_u64_add(g_nbd_write_copied, len);
 #endif
+			/* XXX: any way to avoid this copy? */
 			m_copyback(d, 0, len, data);
 			if (m == NULL)
 				m = m_tail = d;
@@ -712,6 +713,12 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 		 * have a userland daemon to understand it.
 		 */
 		flags = MSG_DONTWAIT | MSG_TLSAPPDATA;
+		/*
+		 * TODO: Looking at cxgbe, if we pass iovecs in the uio instead
+		 * of asking for an mbuf chain then the TOE can do zero-copy DDP
+		 * into the bio for reads.  For T6 with crypto offload this can
+		 * even work with TLS.
+		 */
 		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
 		if (__predict_false(error != 0)) {
 			G_NBD_DEBUG(G_NBD_ERROR,
@@ -781,6 +788,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 		nbd_inflight_deliver(ni, nbd_error_to_errno(reply.error));
 		return;
 	}
+	/* TODO: see comment above soreceive in nbd_conn_recv_mbufs */
 	if (bp->bio_cmd == BIO_READ) {
 		size_t offset = 0;
 		size_t resid = bp->bio_length;
@@ -820,7 +828,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 					    PAGE_SIZE - page_offset);
 					vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(
 					    bp->bio_ma[first_ma + i]));
-					/* XXX: no way to avoid this copy? */
+					/* XXX: any way to avoid this copy? */
 					m_copydata(m, offset1, len1,
 					    (char *)vaddr + page_offset);
 					page_offset = 0;
