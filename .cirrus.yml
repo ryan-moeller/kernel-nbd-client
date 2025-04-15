@@ -48,9 +48,9 @@ task:
     - netstat -w 60 -I lo0 -dnh
   load_script:
     - gnbd load
-    - sysctl kern.geom.nbd.debug=2
+    - sysctl kern.geom.nbd.debug=5
     - sysctl kern.ipc.tls.enable=1
-  lldb_background_script:
+  stats_background_script:
     - sysctl kern.ipc.tls || true
     - while sleep 60; do
         echo;
@@ -58,9 +58,8 @@ task:
         gnbd list || true;
         sysctl kern.geom.nbd || true;
         sysctl kern.ipc.tls.stats || true;
-        sysctl dev.isal.0.stats || true
-        lldb -b -o "script -l lua -- dofile 'gnbd.lua'"
-          -c /dev/mem /boot/kernel/kernel;
+        sysctl dev.isal.0.stats || true;
+        procstat -kka;
       done
   ca_info_file:
     path: ${WD}/ca.info
