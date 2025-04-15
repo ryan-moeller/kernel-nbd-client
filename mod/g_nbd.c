@@ -87,10 +87,6 @@ static COUNTER_U64_DEFINE_EARLY(g_nbd_read_truncs);
 SYSCTL_COUNTER_U64(_kern_geom_nbd_stats, OID_AUTO, read_truncs, CTLFLAG_RD,
     &g_nbd_read_truncs,
     "Number of times read limit was truncated to a page boundary");
-static uint64_t g_nbd_mcmaxlen = 0;
-SYSCTL_U64(_kern_geom_nbd_stats, OID_AUTO, mcmaxlen, CTLFLAG_RD,
-    &g_nbd_mcmaxlen, 0,
-    "Max mbuf chain length");
 #endif
 
 enum {
@@ -171,36 +167,6 @@ static struct sx g_nbd_lock;
 static struct unrhdr *g_nbd_unit;
 static uma_zone_t g_nbd_inflight_zone;
 static u_int g_nbd_tlsmax;
-
-#ifdef INVARIANTS
-static bool
-track_mc_length(struct mbuf *m)
-{
-	size_t n = 0;
-	bool bigger = false;
-
-	while (m != NULL) {
-		m = m->m_next;
-		n++;
-	}
-	sx_slock(&g_nbd_lock);
-	if (__predict_false(n > g_nbd_mcmaxlen)) {
-		if (!sx_try_upgrade(&g_nbd_lock)) {
-			sx_sunlock(&g_nbd_lock);
-			sx_xlock(&g_nbd_lock);
-		}
-		if (__predict_true(n > g_nbd_mcmaxlen)) {
-			bigger = true;
-			g_nbd_mcmaxlen = n;
-		}
-		sx_xunlock(&g_nbd_lock);
-	} else
-		sx_sunlock(&g_nbd_lock);
-	if (__predict_false(bigger))
-		G_NBD_DEBUG(G_NBD_INFO, "g_nbd_mcmaxlen = %zu", g_nbd_mcmaxlen);
-	return (bigger);
-}
-#endif
 
 static inline int16_t
 bio_to_nbd_cmd(struct bio *bp)
@@ -505,11 +471,6 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		m->m_len = len;
 		*offset += len;
 	}
-#ifdef INVARIANTS
-	if (__predict_false(track_mc_length(m)))
-		G_NBD_LOGREQ(G_NBD_INFO, bp, "%s: new longest chain (%d bytes)",
-		    __func__, m_length(m, NULL));
-#endif
 	return (m);
 }
 
@@ -776,11 +737,6 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 		len -= expected - uio.uio_resid;
 	}
 	*mp = m;
-#ifdef INVARIANTS
-	if (__predict_false(track_mc_length(m)))
-		G_NBD_DEBUG(G_NBD_INFO, "%s: new longest chain (%d bytes)",
-		    __func__, m_length(m, NULL));
-#endif
 	return (0);
 }
 
