@@ -17,7 +17,7 @@ This client supports the following noteworthy features:
   network-backed devices.
 * Supports using multiple connections to the NBD server to parallelize commands.
 * Supports optional TLS encryption using ktls(4).
-* It is fast - zero copies are performed where possible.
+* Zero copies are performed for writes where possible.  Reads need some work.
 
 ## Prerequisites
 
