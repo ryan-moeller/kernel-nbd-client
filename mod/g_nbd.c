@@ -1651,12 +1651,19 @@ static void
 g_nbd_done(struct bio *bp)
 {
 	struct bio *pbp;
+	u_int inbed;
 
 	pbp = bp->bio_parent;
+	/*
+	 * An error is set only once on the parent.  If there are multiple
+	 * children with errors, the first to make it here wins.  We use atomic
+	 * operations to guard against multiple child bios completing on
+	 * different threads without contending for a lock.  See sys/geom/notes.
+	 */
 	atomic_cmpset_int(&pbp->bio_error, 0, bp->bio_error);
 	atomic_add_64(&pbp->bio_completed, bp->bio_completed);
-	atomic_add_int(&pbp->bio_inbed, 1);
-	if (pbp->bio_children == pbp->bio_inbed)
+	inbed = atomic_fetchadd_int(&pbp->bio_inbed, 1) + 1;
+	if (pbp->bio_children == inbed)
 		g_io_deliver(pbp, pbp->bio_error);
 	g_destroy_bio(bp);
 }
