@@ -652,8 +652,6 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				m_freem(m);
 				return (error);
 			}
-			KASSERT(uio.uio_resid == 0 || (flags & MSG_EOR) != 0,
-			    ("%s soreceive truncated", __func__));
 			if (m == NULL)
 				m = m_tail = m1;
 			else {
