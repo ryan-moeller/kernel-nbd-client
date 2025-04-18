@@ -13,10 +13,10 @@ task:
         image_family: freebsd-14-2
       env:
         ARCHIVES_PATH: releases/amd64/14.2-RELEASE
-    #- freebsd_instance:
-    #    image_family: freebsd-15-0-snap
-    #  env:
-    #    ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
+    - freebsd_instance:
+        image_family: freebsd-15-0-snap
+      env:
+        ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
   name: ${ARCHIVES_PATH}
   stateful: false
   env:
@@ -24,7 +24,6 @@ task:
     PATH: /usr/local/sbin:${PATH}
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
   build_setup_script:
-    - mount >&2
     - mkdir ${WD}
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel-dbg.txz
     - tar xf ${WD}/kernel-dbg.txz -C / && rm ${WD}/kernel-dbg.txz
@@ -48,7 +47,7 @@ task:
     - netstat -w 60 -I lo0 -dnh
   load_script:
     - gnbd load
-    - sysctl kern.geom.nbd.debug=5
+    - sysctl kern.geom.nbd.debug=1
     - sysctl kern.ipc.tls.enable=1
   stats_background_script:
     - sysctl kern.ipc.tls || true
