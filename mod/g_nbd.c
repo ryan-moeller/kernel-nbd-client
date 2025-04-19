@@ -949,7 +949,7 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 static inline bool
 bio_queue_empty(struct bio_queue *queue)
 {
-	return (TAILQ_FIRST(queue) == NULL);
+	return (TAILQ_EMPTY(queue));
 }
 
 static inline void
