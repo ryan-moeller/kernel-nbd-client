@@ -8,9 +8,7 @@
 #include <sys/bio.h>
 #include <sys/capsicum.h>
 #include <sys/condvar.h>
-#ifdef INVARIANTS
 #include <sys/counter.h>
-#endif
 #include <sys/file.h>
 #include <sys/kthread.h>
 #include <sys/limits.h>
@@ -68,7 +66,6 @@ static int identfmt = 0;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, identfmt, CTLFLAG_RWTUN, &identfmt, 0,
     "Format of GEOM::ident (0=host:port/name, 1=name||host:port/name, 2=name)");
 
-#ifdef INVARIANTS
 static SYSCTL_NODE(_kern_geom_nbd, OID_AUTO, stats, CTLFLAG_RW | CTLFLAG_MPSAFE,
     0, "GEOM NBD stats");
 static COUNTER_U64_DEFINE_EARLY(g_nbd_write_copied);
@@ -87,7 +84,6 @@ static COUNTER_U64_DEFINE_EARLY(g_nbd_read_truncs);
 SYSCTL_COUNTER_U64(_kern_geom_nbd_stats, OID_AUTO, read_truncs, CTLFLAG_RD,
     &g_nbd_read_truncs,
     "Number of times read limit was truncated to a page boundary");
-#endif
 
 enum {
 	G_NBD_ERROR,
@@ -364,9 +360,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit - page_offset) + page_offset;
-#ifdef INVARIANTS
 			counter_u64_add(g_nbd_write_truncs, 1);
-#endif
 		}
 		*offset += resid;
 		m = m_tail = d = NULL;
@@ -419,9 +413,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit);
-#ifdef INVARIANTS
 			counter_u64_add(g_nbd_write_truncs, 1);
-#endif
 		}
 		*offset += resid;
 		m = NULL;
@@ -438,9 +430,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 			d->m_epg_last_len =
 			    PAGE_SIZE - (d->m_ext.ext_size - len);
 			MBUF_EXT_PGS_ASSERT_SANITY(d);
-#ifdef INVARIANTS
 			counter_u64_add(g_nbd_write_copied, len);
-#endif
 			/* XXX: any way to avoid this copy? */
 			m_copyback(d, 0, len, data);
 			if (m == NULL)
@@ -487,9 +477,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
 	m = nbd_request_mbuf(tls, &req);
 	if (__predict_false(m == NULL)) {
-#ifdef INVARIANTS
 		counter_u64_add(g_nbd_enomems, 1);
-#endif
 		nbd_conn_remove_inflight_specific(nc, ni);
 		nbd_inflight_deliver(ni, ENOMEM);
 		return;
@@ -513,9 +501,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			d = nbd_write_mbufs(ni, tls, limit, &offset);
 			if (__predict_false(d == NULL)) {
 				m_free(m);
-#ifdef INVARIANTS
 				counter_u64_add(g_nbd_enomems, 1);
-#endif
 				nbd_conn_remove_inflight_specific(nc, ni);
 				nbd_inflight_deliver(ni, ENOMEM);
 				return;
@@ -561,10 +547,8 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s sosend failed (%d)",
 			    __func__, error);
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
-#ifdef INVARIANTS
 			if (error == ENOMEM)
 				counter_u64_add(g_nbd_enomems, 1);
-#endif
 			nbd_conn_remove_inflight_specific(nc, ni);
 			nbd_inflight_deliver(ni, error);
 			return;
@@ -671,10 +655,8 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				    __func__);
 				nbd_conn_degrade_state(nc,
 				    NBD_CONN_HARD_DISCONNECTING);
-#ifdef INVARIANTS
 				if (error == ENOMEM)
 					counter_u64_add(g_nbd_enomems, 1);
-#endif
 				m_freem(m);
 				return (ENXIO);
 			}
@@ -711,10 +693,8 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			    error);
 			nbd_conn_degrade_state(nc,
 			    NBD_CONN_HARD_DISCONNECTING);
-#ifdef INVARIANTS
 			if (error == ENOMEM)
 				counter_u64_add(g_nbd_enomems, 1);
-#endif
 			m_freem(m);
 			return (error);
 		}
@@ -786,9 +766,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 
 			if (len > limit) {
 				len = trunc_page(limit);
-#ifdef INVARIANTS
 				counter_u64_add(g_nbd_read_truncs, 1);
-#endif
 			}
 			error = nbd_conn_recv_mbufs(nc, len, &m);
 			if (__predict_false(error != 0)) {
@@ -1096,9 +1074,7 @@ nbd_conn_sender(void *arg)
 			ni = nbd_conn_enqueue_inflight(nc, bp);
 			if (__predict_false(ni == NULL)) {
 				sx_xunlock(&sc->sc_flush_lock);
-#ifdef INVARIANTS
 				counter_u64_add(g_nbd_enomems, 1);
-#endif
 				g_io_deliver(bp, ENOMEM);
 				continue;
 			}
@@ -1120,9 +1096,7 @@ nbd_conn_sender(void *arg)
 			} else
 				ni = nbd_conn_enqueue_inflight(nc, bp);
 			if (__predict_false(ni == NULL)) {
-#ifdef INVARIANTS
 				counter_u64_add(g_nbd_enomems, 1);
-#endif
 				g_io_deliver(bp, ENOMEM);
 				continue;
 			}
@@ -1928,9 +1902,7 @@ g_nbd_start(struct bio *bp)
 		bp2 = NULL;
 		bp1 = g_clone_bio(bp);
 		if (__predict_false(bp1 == NULL)) {
-#ifdef INVARIANTS
 			counter_u64_add(g_nbd_enomems, 1);
-#endif
 			g_io_deliver(bp, ENOMEM);
 			return;
 		}
@@ -1940,9 +1912,7 @@ g_nbd_start(struct bio *bp)
 				/* Grab next bio now to avoid race. */
 				bp2 = g_clone_bio(bp);
 				if (__predict_false(bp2 == NULL)) {
-#ifdef INVARIANTS
 					counter_u64_add(g_nbd_enomems, 1);
-#endif
 					bp->bio_error = ENOMEM;
 				}
 			}
