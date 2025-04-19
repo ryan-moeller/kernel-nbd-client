@@ -1898,14 +1898,14 @@ g_nbd_start(struct bio *bp)
 		break;
 	case BIO_READ:
 	case BIO_WRITE:
-		offset = 0;
-		bp2 = NULL;
 		bp1 = g_clone_bio(bp);
 		if (__predict_false(bp1 == NULL)) {
 			counter_u64_add(g_nbd_enomems, 1);
 			g_io_deliver(bp, ENOMEM);
 			return;
 		}
+		offset = 0;
+		bp2 = NULL;
 		for (;;) {
 			if (g_nbd_limit(sc, bp1)) {
 				offset += bp1->bio_length;
