@@ -221,12 +221,9 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 static void
 nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
-	bool last;
-
 	G_NBD_LOGREQ(G_NBD_TRACE, ni->ni_bio, "%s", __func__);
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
-	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
 	if (__predict_false(atomic_load_bool(&nc->nc_softc->sc_flushing))) {
 		switch (ni->ni_bio->bio_cmd) {
@@ -235,11 +232,6 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 			wakeup_one(ni);
 		}
 	}
-	if (__predict_false(last && atomic_load_int(&nc->nc_state)
-	    == NBD_CONN_SOFT_DISCONNECTING))
-		wakeup_one(&nc->nc_inflight);
-	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
-	    last ? "true" : "false");
 }
 
 static inline void
@@ -638,7 +630,6 @@ static struct nbd_inflight *
 nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 {
 	struct nbd_inflight *ni, *ni2;
-	bool last;
 
 	G_NBD_DEBUG(G_NBD_TRACE, "%s cookie=%lu", __func__, cookie);
 	mtx_lock(&nc->nc_inflight_mtx);
@@ -648,7 +639,6 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 			break;
 		}
 	}
-	last = TAILQ_EMPTY(&nc->nc_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
 	if (__predict_false(ni != NULL &&
 	    atomic_load_bool(&nc->nc_softc->sc_flushing))) {
@@ -658,11 +648,6 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 			wakeup_one(ni);
 		}
 	}
-	if (__predict_false(last && atomic_load_int(&nc->nc_state)
-	    == NBD_CONN_SOFT_DISCONNECTING))
-		wakeup_one(&nc->nc_inflight);
-	G_NBD_LOGREQ(G_NBD_DEBUG0, ni->ni_bio, "%s last=%s", __func__,
-	    last ? "true" : "false");
 	return (ni);
 }
 
@@ -914,7 +899,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
 	m = nbd_request_mbuf(nc->nc_softc->sc_tls, &req);
 	if (m == NULL)
-		goto done;
+		goto error;
 	memset(req, 0, sizeof(*req));
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->command = htobe16(NBD_CMD_DISCONNECT);
@@ -925,7 +910,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 			SOCK_SENDBUF_UNLOCK(so);
 			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
 			m_free(m);
-			goto done;
+			goto error;
 		}
 		if (sbspace(&so->so_snd) >= needed)
 			break;
@@ -939,20 +924,11 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	if (error != 0) {
 		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
 		    error);
-		goto done;
+		goto error;
 	}
 	soshutdown(so, SHUT_WR);
-	while (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
-		mtx_lock(&nc->nc_inflight_mtx);
-		if (TAILQ_FIRST(&nc->nc_inflight) != NULL) {
-			mtx_sleep(&nc->nc_inflight, &nc->nc_inflight_mtx,
-			    PRIBIO | PDROP, "gnbd:inflight", 0);
-			continue;
-		}
-		mtx_unlock(&nc->nc_inflight_mtx);
-		break;
-	}
-done:
+	return;
+error:
 	atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 }
 
@@ -1158,7 +1134,6 @@ nbd_conn_sender(void *arg)
 	socantrcvmore(so);
 	cv_signal(&nc->nc_receive_cv);
 	sema_wait(&nc->nc_receiver_done);
-	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
 	if (g_nbd_remove_conn(sc, nc)) {
 		G_NBD_DEBUG(G_NBD_INFO, "%s last connection closed", __func__);
@@ -1169,6 +1144,12 @@ nbd_conn_sender(void *arg)
 	}
 	kthread_exit();
 }
+
+/* Not in releases yet. */
+#ifndef TAILQ_EMPTY_ATOMIC
+#define TAILQ_EMPTY_ATOMIC(head) \
+	(atomic_load_ptr(&(head)->tqh_first) == NULL)
+#endif
 
 static void
 nbd_conn_receiver(void *arg)
@@ -1183,11 +1164,16 @@ nbd_conn_receiver(void *arg)
 	sched_prio(curthread, PSOCK); /* XXX: or PRIBIO? */
 	thread_unlock(curthread);
 
-	while (__predict_true(atomic_load_int(&nc->nc_state) !=
-	    NBD_CONN_HARD_DISCONNECTING))
+	while (__predict_true(atomic_load_int(&nc->nc_state) ==
+	    NBD_CONN_CONNECTED))
 		nbd_conn_recv(nc);
+	while (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING &&
+	    !TAILQ_EMPTY_ATOMIC(&nc->nc_inflight))
+		nbd_conn_recv(nc);
+	atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
 	socantsendmore(so);
 	cv_signal(&nc->nc_send_cv);
+	nbd_conn_drain_inflight(nc);
 	wakeup(&sc->sc_queue);
 	sema_post(&nc->nc_receiver_done);
 	kthread_exit();
