@@ -966,7 +966,7 @@ g_nbd_drain_queue(struct g_nbd_softc *sc)
 static inline bool
 g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 {
-	bool empty;
+	bool last;
 
 	KASSERT(nc->nc_state == NBD_CONN_CLOSED,
 	    ("tried to remove open connection"));
@@ -975,7 +975,7 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_REMOVE(&sc->sc_connections, nc, nbd_conn, nc_connections);
-	empty = --sc->sc_nconns == 0;
+	last = --sc->sc_nconns == 0;
 	mtx_unlock(&sc->sc_conns_mtx);
 
 	sx_xlock(&g_nbd_lock);
@@ -992,7 +992,7 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 	cv_destroy(&nc->nc_send_cv);
 	mtx_destroy(&nc->nc_inflight_mtx);
 	g_free(nc);
-	return (empty);
+	return (last);
 }
 
 static inline bool
