@@ -11,6 +11,7 @@
 #include <sys/counter.h>
 #include <sys/file.h>
 #include <sys/kthread.h>
+#include <sys/ktr.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -89,14 +90,15 @@ enum {
 	G_NBD_ERROR,
 	G_NBD_WARN,
 	G_NBD_INFO,
-	G_NBD_TRACE,
-	G_NBD_DEBUG0,
+	G_NBD_DEBUG,
 };
 
-#define G_NBD_DEBUG(lvl, ...) \
+#define G_NBD_LOG(lvl, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
 #define G_NBD_LOGREQ(lvl, bp, ...) \
     _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), (bp), __VA_ARGS__)
+
+#define KTR_NBD KTR_SPARE4
 
 struct g_nbd_softc;
 
@@ -201,7 +203,8 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 {
 	struct nbd_inflight *ni;
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s cookie=%lu", __func__, nc->nc_seq);
+	CTR4(KTR_NBD, "%s nc=%p bp=%p cookie=%lu", __func__, nc, bp,
+	    nc->nc_seq);
 	ni = uma_zalloc(g_nbd_inflight_zone, M_NOWAIT | M_ZERO);
 	if (__predict_false(ni == NULL))
 		return (NULL);
@@ -217,7 +220,7 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 static void
 nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 {
-	G_NBD_LOGREQ(G_NBD_TRACE, ni->ni_bio, "%s", __func__);
+	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, ni->ni_cookie);
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
@@ -235,7 +238,7 @@ nbd_inflight_deliver(struct nbd_inflight *ni, int error)
 {
 	struct bio *bp = ni->ni_bio;
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
+	CTR3(KTR_NBD, "%s cookie=%lu error=%d", __func__, ni->ni_cookie, error);
 	atomic_cmpset_int(&bp->bio_error, 0, error);
 	if (refcount_release(&ni->ni_refs)) {
 		g_io_deliver(bp, bp->bio_error);
@@ -248,10 +251,11 @@ nbd_inflight_free_mext(struct mbuf *m)
 {
 	struct nbd_inflight *ni = m->m_ext.ext_arg1;
 
-	G_NBD_LOGREQ(G_NBD_TRACE, ni->ni_bio, "%s", __func__);
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
 	nbd_inflight_deliver(ni, 0);
 }
 
+#ifdef KTR
 static inline const char *
 nbd_conn_state_str(enum nbd_conn_state state)
 {
@@ -265,6 +269,7 @@ nbd_conn_state_str(enum nbd_conn_state state)
 	default: return "[unknown]";
 	}
 }
+#endif
 
 /*
  * Degrade nc->nc_state if possible, locklessly.
@@ -275,8 +280,8 @@ nbd_conn_degrade_state(struct nbd_conn *nc, enum nbd_conn_state state)
 	KASSERT(NBD_CONN_CONNECTED < state && state < NBD_CONN_CLOSED,
 	    ("tried degrading to an invalid state"));
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s nc->nc_state=%s (%d) state=%s (%d)",
-	    __func__, nbd_conn_state_str(nc->nc_state), nc->nc_state,
+	CTR6(KTR_NBD, "%s nc=%p nc_state=%s (%d) -> state=%s (%d)",
+	    __func__, nc, nbd_conn_state_str(nc->nc_state), nc->nc_state,
 	    nbd_conn_state_str(state), state);
 	if (atomic_cmpset_int(&nc->nc_state, NBD_CONN_CONNECTED, state))
 		return;
@@ -290,20 +295,24 @@ nbd_conn_send_ok(struct nbd_conn *nc, struct bio *bp)
 
 	if (__predict_false(atomic_load_int(&nc->nc_state) !=
 	    NBD_CONN_CONNECTED)) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "nc_state=%s",
-		    nbd_conn_state_str(nc->nc_state));
+		CTR5(KTR_NBD, "%s nc=%p bp=%p nc_state=%s (%d)", __func__, nc,
+		    bp, nbd_conn_state_str(nc->nc_state), nc->nc_state);
 		return (false);
 	}
 	if (__predict_false(so->so_error != 0)) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp, "so_error=%d", so->so_error);
+		G_NBD_LOGREQ(G_NBD_WARN, bp, "socket error %d", so->so_error);
+		CTR4(KTR_NBD, "%s nc=%p bp=%p so_error=%d", __func__, nc, bp,
+		    so->so_error);
 		return (false);
 	}
 	if (__predict_false((so->so_state & SS_ISCONNECTED) == 0)) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "not connected");
+		CTR3(KTR_NBD, "%s nc=%p bp=%p socket not connected", __func__,
+		    nc, bp);
 		return (false);
 	}
 	if (__predict_false((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0)) {
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "cannot send more");
+		CTR3(KTR_NBD, "%s nc=%p bp=%p socket cannot send more",
+		    __func__, nc, bp);
 		return (false);
 	}
 	return (true);
@@ -346,16 +355,16 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 	KASSERT(start < bp->bio_length, ("%s offset %zu out of bounds",
 	    __func__, start));
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s %s limit=%zu *offset=%zu", __func__,
-	      tls ? "tls" : "notls", limit, start);
+	CTR5(KTR_NBD, "%s cookie=%lu %s limit=%zu *offset=%zu", __func__,
+	    ni->ni_cookie, tls ? "tls" : "notls", limit, start);
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 		struct mbuf *d, *m_tail;
 		size_t page_offset = start == 0 ? bp->bio_ma_offset : 0;
 		size_t resid = bp->bio_length;
 		size_t len;
 
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s unmapped write (%s)",
-		    __func__, tls ? "tls" : "notls");
+		CTR3(KTR_NBD, "%s cookie=%lu unmapped write (%s)", __func__,
+		    ni->ni_cookie, tls ? "tls" : "notls");
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit - page_offset) + page_offset;
@@ -409,8 +418,8 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		size_t resid = bp->bio_length - start;
 		size_t len;
 
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (tls)",
-		    __func__);
+		CTR2(KTR_NBD, "%s cookie=%lu mapped write (tls)", __func__,
+		    ni->ni_cookie);
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit);
@@ -446,8 +455,8 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 	} else {
 		size_t len = MIN(bp->bio_length - start, limit);
 
-		G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped write (notls)",
-		    __func__);
+		CTR2(KTR_NBD, "%s cookie=%lu mapped write (notls)", __func__,
+		    ni->ni_cookie);
 		m = m_get(M_NOWAIT, MT_DATA);
 		if (__predict_false(m == NULL))
 			return (NULL);
@@ -477,7 +486,7 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
 	m = nbd_request_mbuf(tls, &req);
 	if (__predict_false(m == NULL)) {
 		counter_u64_add(g_nbd_enomems, 1);
@@ -574,7 +583,7 @@ static inline bool
 nbd_simple_reply_is_valid(struct nbd_simple_reply *reply)
 {
 	if (__predict_false(reply->magic != NBD_SIMPLE_REPLY_MAGIC)) {
-		G_NBD_DEBUG(G_NBD_INFO, "magic=0x%08x != 0x%08x", reply->magic,
+		G_NBD_LOG(G_NBD_INFO, "magic=0x%08x != 0x%08x", reply->magic,
 		    NBD_SIMPLE_REPLY_MAGIC);
 		return (false);
 	}
@@ -604,21 +613,26 @@ nbd_conn_recv_ok(struct nbd_conn *nc)
 	enum nbd_conn_state state = atomic_load_int(&nc->nc_state);
 
 	if (__predict_false(state == NBD_CONN_HARD_DISCONNECTING)) {
-		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
-		    nbd_conn_state_str(nc->nc_state));
+		CTR4(KTR_NBD, "%s nc=%p nc_state=%s (%d)", __func__, nc,
+		    nbd_conn_state_str(nc->nc_state), nc->nc_state);
 		return (false);
 	}
 	if (__predict_false(state == NBD_CONN_SOFT_DISCONNECTING) &&
 	    TAILQ_EMPTY_ATOMIC(&nc->nc_inflight)) {
-		G_NBD_DEBUG(G_NBD_INFO, "soft disconnected");
+		G_NBD_LOG(G_NBD_INFO, "soft disconnected");
+		CTR2(KTR_NBD, "%s nc=%p soft disconnect done", __func__, nc);
 		return (false);
 	}
 	if (__predict_false(so->so_error != 0)) {
-		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
+		G_NBD_LOG(G_NBD_WARN, "socket error %d", so->so_error);
+		CTR3(KTR_NBD, "%s nc=%p so_error=%d", __func__, nc,
+		    so->so_error);
 		return (false);
 	}
 	if (__predict_false(so->so_rerror != 0)) {
-		G_NBD_DEBUG(G_NBD_WARN, "so_rerror=%d", so->so_rerror);
+		G_NBD_LOG(G_NBD_WARN, "socket receive error %d", so->so_rerror);
+		CTR3(KTR_NBD, "%s nc=%p so_rerror=%d", __func__, nc,
+		    so->so_rerror);
 		return (false);
 	}
 	return (true);
@@ -629,7 +643,7 @@ nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 {
 	struct nbd_inflight *ni, *ni2;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s cookie=%lu", __func__, cookie);
+	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, cookie);
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_FOREACH_SAFE(ni, &nc->nc_inflight, ni_inflight, ni2) {
 		if (ni->ni_cookie == cookie) {
@@ -658,14 +672,14 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	size_t available, expected;
 	int flags, error;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s len=%zu", __func__, len);
+	CTR3(KTR_NBD, "%s nc=%p len=%zu", __func__, nc, len);
 	m = NULL;
 	while (len > 0) {
 		SOCK_RECVBUF_LOCK(so);
 		for (;;) {
 			if (__predict_false(!nbd_conn_recv_ok(nc))) {
 				SOCK_RECVBUF_UNLOCK(so);
-				G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting",
+				G_NBD_LOG(G_NBD_INFO, "%s disconnecting",
 				    __func__);
 				nbd_conn_degrade_state(nc,
 				    NBD_CONN_HARD_DISCONNECTING);
@@ -729,9 +743,8 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 		 */
 		error = soreceive(so, NULL, &uio, &m1, NULL, &flags);
 		if (__predict_false(error != 0)) {
-			G_NBD_DEBUG(G_NBD_ERROR,
-			    "%s soreceive failed (%d)", __func__,
-			    error);
+			G_NBD_LOG(G_NBD_ERROR, "%s soreceive failed (%d)",
+			    __func__, error);
 			nbd_conn_degrade_state(nc,
 			    NBD_CONN_HARD_DISCONNECTING);
 			if (error == ENOMEM)
@@ -764,24 +777,24 @@ nbd_conn_recv(struct nbd_conn *nc)
 	struct bio *bp;
 	int error;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
 	error = nbd_conn_recv_mbufs(nc, sizeof(reply), &m);
 	if (__predict_false(error != 0))
 		return;
-	G_NBD_DEBUG(G_NBD_DEBUG0, "%s received reply", __func__);
+	CTR2(KTR_NBD, "%s nc=%p received reply", __func__, nc);
 	m_copydata(m, 0, sizeof(reply), (void *)&reply);
 	m_freem(m);
 	nbd_simple_reply_ntoh(&reply);
 	if (__predict_false(!nbd_simple_reply_is_valid(&reply))) {
-		G_NBD_DEBUG(G_NBD_ERROR, "%s received invalid reply", __func__);
+		G_NBD_LOG(G_NBD_ERROR, "%s received invalid reply", __func__);
 		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 		return;
 	}
 	/* TODO: structured replies can have multiple replies per cookie */
 	ni = nbd_conn_remove_inflight(nc, reply.cookie);
 	if (__predict_false(ni == NULL)) {
-		G_NBD_DEBUG(G_NBD_ERROR,
-		    "%s did not find inflight bio for cookie 0x%lx", __func__,
+		G_NBD_LOG(G_NBD_ERROR,
+		    "%s did not find inflight bio for cookie %lu", __func__,
 		    reply.cookie);
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 		return;
@@ -815,8 +828,8 @@ nbd_conn_recv(struct nbd_conn *nc)
 				nbd_inflight_deliver(ni, error);
 				return;
 			}
-			G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s received read data",
-			    __func__);
+			CTR3(KTR_NBD, "%s nc=%p cookie=%lu received read data",
+			    __func__, nc, ni->ni_cookie);
 			if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 				vm_offset_t vaddr;
 				size_t page_offset =
@@ -825,8 +838,9 @@ nbd_conn_recv(struct nbd_conn *nc)
 				size_t resid1 = len;
 				size_t len1;
 
-				G_NBD_LOGREQ(G_NBD_DEBUG0, bp,
-				    "%s unmapped read", __func__);
+				CTR3(KTR_NBD,
+				    "%s nc=%p cookie=%lu unmapped read",
+				    __func__, nc, ni->ni_cookie);
 				for (int i = OFF_TO_IDX(offset + page_offset);
 				    resid1 > 0; i++) {
 					len1 = MIN(resid1,
@@ -842,8 +856,8 @@ nbd_conn_recv(struct nbd_conn *nc)
 					resid1 -= len1;
 				}
 			} else {
-				G_NBD_LOGREQ(G_NBD_DEBUG0, bp, "%s mapped read",
-				    __func__);
+				CTR3(KTR_NBD, "%s nc=%p cookie=%lu mapped read",
+				    __func__, nc, ni->ni_cookie);
 				m_copydata(m, 0, len, bp->bio_data + offset);
 			}
 			m_freem(m);
@@ -862,6 +876,7 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct nbd_conn *nc;
 	struct nbd_inflight *ni;
 
+	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
 	mtx_lock(&sc->sc_conns_mtx);
 	atomic_store_bool(&sc->sc_flushing, true);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
@@ -889,20 +904,22 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 	struct socket *so = nc->nc_socket;
 
 	if (atomic_load_int(&nc->nc_state) != NBD_CONN_SOFT_DISCONNECTING) {
-		G_NBD_DEBUG(G_NBD_DEBUG0, "nc_state=%s",
-		    nbd_conn_state_str(nc->nc_state));
+		CTR4(KTR_NBD, "%s nc=%p nc_state=%s (%d)", __func__, nc,
+		    nbd_conn_state_str(nc->nc_state), nc->nc_state);
 		return (false);
 	}
 	if (so->so_error != 0) {
-		G_NBD_DEBUG(G_NBD_WARN, "so_error=%d", so->so_error);
+		G_NBD_LOG(G_NBD_WARN, "socket error %d", so->so_error);
+		CTR3(KTR_NBD, "%s nc=%p so_error=%d", __func__, nc,
+		    so->so_error);
 		return (false);
 	}
 	if (__predict_false((so->so_state & SS_ISCONNECTED) == 0)) {
-		G_NBD_DEBUG(G_NBD_DEBUG0, "not connected");
+		CTR2(KTR_NBD, "%s nc=%p socket not connected", __func__, nc);
 		return (false);
 	}
 	if ((so->so_snd.sb_state & SBS_CANTSENDMORE) != 0) {
-		G_NBD_DEBUG(G_NBD_DEBUG0, "cannot send more");
+		CTR2(KTR_NBD, "%s nc=%p socket cannot send more", __func__, nc);
 		return (false);
 	}
 	return (true);
@@ -917,7 +934,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	long needed; /* must be signed */
 	int error;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
 	m = nbd_request_mbuf(nc->nc_softc->sc_tls, &req);
 	if (m == NULL)
 		goto error;
@@ -929,7 +946,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	for (;;) {
 		if (!nbd_conn_soft_disconnect_ok(nc)) {
 			SOCK_SENDBUF_UNLOCK(so);
-			G_NBD_DEBUG(G_NBD_INFO, "%s disconnecting", __func__);
+			G_NBD_LOG(G_NBD_INFO, "%s disconnecting", __func__);
 			m_free(m);
 			goto error;
 		}
@@ -943,7 +960,7 @@ nbd_conn_soft_disconnect(struct nbd_conn *nc)
 	SOCK_SENDBUF_UNLOCK(so);
 	error = sosend(so, NULL, NULL, m, NULL, MSG_DONTWAIT, NULL);
 	if (error != 0) {
-		G_NBD_DEBUG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
+		G_NBD_LOG(G_NBD_ERROR, "%s sosend failed (%d)", __func__,
 		    error);
 		goto error;
 	}
@@ -958,7 +975,7 @@ nbd_conn_close(struct nbd_conn *nc)
 {
 	struct socket *so = nc->nc_socket;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
 	atomic_store_int(&nc->nc_state, NBD_CONN_CLOSED);
 	SOCK_SENDBUF_LOCK(so);
 	soupcall_clear(so, SO_SND);
@@ -974,7 +991,7 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 {
 	struct nbd_inflight *ni;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
 	mtx_lock(&nc->nc_inflight_mtx);
 	while ((ni = TAILQ_FIRST(&nc->nc_inflight)) != NULL) {
 		TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
@@ -999,7 +1016,7 @@ g_nbd_drain_queue(struct g_nbd_softc *sc)
 {
 	struct bio *bp;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
 	mtx_lock(&sc->sc_queue_mtx);
 	while ((bp = bio_queue_takefirst(&sc->sc_queue)) != NULL)
 		g_io_deliver(bp, ENXIO);
@@ -1014,7 +1031,7 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 	KASSERT(nc->nc_state == NBD_CONN_CLOSED,
 	    ("tried to remove open connection"));
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR3(KTR_NBD, "%s sc=%p nc=%p", __func__, sc, nc);
 
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_REMOVE(&sc->sc_connections, nc, nbd_conn, nc_connections);
@@ -1053,7 +1070,7 @@ g_nbd_free(struct g_nbd_softc *sc)
 	KASSERT(bio_queue_empty(&sc->sc_queue),
 	    ("tried to free with bios in queue"));
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
 	g_topology_lock();
 	gp->softc = NULL;
 	g_wither_geom(gp, ENXIO);
@@ -1067,7 +1084,7 @@ g_nbd_free(struct g_nbd_softc *sc)
 	g_free(__DECONST(char *, sc->sc_port));
 	g_free(__DECONST(char *, sc->sc_host));
 	g_free(sc);
-	G_NBD_DEBUG(G_NBD_DEBUG0, "%s completed", __func__);
+	CTR2(KTR_NBD, "%s sc=%p completed", __func__, sc);
 }
 
 static void
@@ -1079,7 +1096,7 @@ nbd_conn_sender(void *arg)
 	struct nbd_inflight *ni;
 	struct bio *bp;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR3(KTR_NBD, "%s sc=%p nc=%p", __func__, sc, nc);
 
 	thread_lock(curthread);
 	sched_prio(curthread, PRIBIO);
@@ -1155,7 +1172,7 @@ nbd_conn_sender(void *arg)
 	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
 	if (g_nbd_remove_conn(sc, nc)) {
-		G_NBD_DEBUG(G_NBD_INFO, "%s last connection closed", __func__);
+		G_NBD_LOG(G_NBD_INFO, "%s last connection closed", __func__);
 		g_wither_provider(sc->sc_provider, ENXIO);
 		/* TODO: option to save the queue for a rescue operation */
 		g_nbd_drain_queue(sc);
@@ -1171,7 +1188,7 @@ nbd_conn_receiver(void *arg)
 	struct g_nbd_softc *sc = nc->nc_softc;
 	struct socket *so = nc->nc_socket;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR3(KTR_NBD, "%s sc=%p nc=%p", __func__, sc, nc);
 
 	thread_lock(curthread);
 	sched_prio(curthread, PSOCK); /* XXX: or PRIBIO? */
@@ -1235,21 +1252,20 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 	return (SU_OK);
 }
 
-/* Not in releases yet. */
-#ifndef SLIST_EMPTY_ATOMIC
-#define SLIST_EMPTY_ATOMIC(head) \
-	(atomic_load_ptr(&(head)->slh_first) == NULL)
-#endif
-
-static void
+static int
 g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
     bool first)
 {
 	struct nbd_conn *nc;
-	int rc;
+	int error;
 
-	if (!first && SLIST_EMPTY_ATOMIC(&sc->sc_connections))
-		return;
+	/*
+	 * TODO: Allow recovery when all connections have failed.  For now we
+	 * must assume the device is in the process of shutting down and cannot
+	 * continue.
+	 */
+	if (!first && sc->sc_nconns == 0)
+		return (ENXIO);
 
 	nc = g_malloc(sizeof(*nc), M_WAITOK | M_ZERO);
 	nc->nc_softc = sc;
@@ -1277,14 +1293,24 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 
 	sx_xlock(&g_nbd_lock);
 	g_nbd_nconns++;
-	/* XXX: assumed success... */
-	rc = kproc_kthread_add(nbd_conn_sender, nc, &g_nbd_proc, NULL, 0, 0,
+	error = kproc_kthread_add(nbd_conn_sender, nc, &g_nbd_proc, NULL, 0, 0,
 	    G_NBD_PROC_NAME, "gnbd %s sender", name);
-	G_NBD_DEBUG(G_NBD_DEBUG0, "%s add sender rc=%d", __func__, rc);
-	rc = kproc_kthread_add(nbd_conn_receiver, nc, &g_nbd_proc, NULL, 0, 0,
-	    G_NBD_PROC_NAME, "gnbd %s receiver", name);
-	G_NBD_DEBUG(G_NBD_DEBUG0, "%s add receiver rc=%d", __func__, rc);
+	if (error != 0) {
+		sx_xunlock(&g_nbd_lock);
+		G_NBD_LOG(G_NBD_ERROR, "%s failed to add sender thread (%d)",
+		    __func__, error);
+		return (error);
+	}
+	error = kproc_kthread_add(nbd_conn_receiver, nc, &g_nbd_proc, NULL, 0,
+	    0, G_NBD_PROC_NAME, "gnbd %s receiver", name);
+	if (error != 0) {
+		sx_xunlock(&g_nbd_lock);
+		G_NBD_LOG(G_NBD_ERROR, "%s failed to add receiver thread (%d)",
+		    __func__, error);
+		return (error);
+	}
 	sx_xunlock(&g_nbd_lock);
+	return (0);
 }
 
 static struct socket **
@@ -1298,7 +1324,7 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 	int *sp;
 	int error;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	tidp = gctl_get_paraml(req, "thread", sizeof(*tidp));
 	if (tidp == NULL) {
 		gctl_error(req, "No 'thread' argument.");
@@ -1397,11 +1423,11 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	intmax_t *cp;
 	rlim_t sbsize;
 	u_long minspace;
-	int unit, nsockets;
+	int unit, nsockets, error;
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	unit = alloc_unr(g_nbd_unit);
 	if (unit == -1) {
 		gctl_error(req, "No free unit numbers.");
@@ -1505,24 +1531,24 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	 */
 	minspace = sizeof(struct nbd_request) + minbs;
 	if (sendspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
+		G_NBD_LOG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
 		    sendspace, minspace);
 		sendspace = minspace;
 	}
 	if (sendspace > sbsize) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
+		G_NBD_LOG(G_NBD_WARN, "kern.geom.nbd.sendspace %lu -> %lu",
 		    sendspace, sbsize);
 		sendspace = sbsize;
 	}
 	/* TODO: support structured replies */
 	minspace = sizeof(struct nbd_simple_reply) + minbs;
 	if (recvspace < minspace) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
+		G_NBD_LOG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
 		    recvspace, minspace);
 		recvspace = minspace;
 	}
 	if (recvspace > sbsize) {
-		G_NBD_DEBUG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
+		G_NBD_LOG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
 		    recvspace, sbsize);
 		recvspace = sbsize;
 	}
@@ -1581,8 +1607,12 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	pp->stripesize = sc->sc_prefblocksize;
 	sc->sc_provider = pp;
 	g_error_provider(pp, 0);
-	for (int i = 0; i < nsockets; i++)
-		g_nbd_add_conn(sc, sockets[i], gp->name, i == 0);
+	for (int i = 0; i < nsockets; i++) {
+		error = g_nbd_add_conn(sc, sockets[i], gp->name, i == 0);
+		if (error != 0) {
+			/* TODO: handle this rare error */
+		}
+	}
 	g_free(sockets);
 	gctl_set_param_err(req, "provider", pp->name, strlen(pp->name) + 1);
 }
@@ -1612,11 +1642,11 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	intmax_t *cp;
 	struct socket **sockets;
 	int *nsocketsp;
-	int nconns, nsockets;
+	int nconns, nsockets, error;
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	name = gctl_get_asciiparam(req, "arg0");
 	if (name == NULL) {
 		gctl_error(req, "Missing device.");
@@ -1673,8 +1703,12 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	sockets = g_nbd_ctl_steal_sockets(req, nsockets);
 	if (sockets == NULL)
 		return;
-	for (int i = 0; i < nsockets; i++)
-		g_nbd_add_conn(sc, sockets[i], gp->name, false);
+	for (int i = 0; i < nsockets; i++) {
+		error = g_nbd_add_conn(sc, sockets[i], gp->name, false);
+		if (error != 0) {
+			/* TODO: handle this rare error */
+		}
+	}
 	g_free(sockets);
 }
 
@@ -1685,7 +1719,7 @@ g_nbd_destroy(struct g_nbd_softc *sc)
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections)
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
@@ -1702,7 +1736,7 @@ g_nbd_ctl_disconnect(struct gctl_req *req, struct g_class *mp)
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	name = gctl_get_asciiparam(req, "arg0");
 	if (name == NULL) {
 		gctl_error(req, "Missing device.");
@@ -1723,7 +1757,7 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	version = gctl_get_paraml(req, "version", sizeof(*version));
 	if (version == NULL) {
 		gctl_error(req, "No 'version' argument.");
@@ -1757,7 +1791,7 @@ g_nbd_ctl_destroy(struct gctl_req *req __unused, struct g_class *mp __unused,
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	g_nbd_destroy(sc);
 	return (EBUSY);
 }
@@ -1767,7 +1801,7 @@ g_nbd_init(struct g_class *mp __unused)
 {
 	size_t sz;
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	sx_init(&g_nbd_lock, "GEOM NBD connections");
 	g_nbd_unit = new_unrhdr(0, INT_MAX, NULL);
 	g_nbd_inflight_zone = uma_zcreate("nbd_inflight",
@@ -1782,7 +1816,7 @@ g_nbd_init(struct g_class *mp __unused)
 static void
 g_nbd_fini(struct g_class *mp __unused)
 {
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	KASSERT(g_nbd_nconns == 0, ("connections still running"));
 	uma_zdestroy(g_nbd_inflight_zone);
 	delete_unrhdr(g_nbd_unit);
@@ -1913,7 +1947,7 @@ g_nbd_start(struct bio *bp)
 	struct bio *bp1, *bp2;
 	off_t offset;
 
-	G_NBD_LOGREQ(G_NBD_TRACE, bp, "%s", __func__);
+	CTR2(KTR_NBD, "%s bp=%p", __func__, bp);
 	if (__predict_false(sc == NULL)) {
 		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s softc NULL", __func__);
 		g_io_deliver(bp, ENXIO);
@@ -2022,7 +2056,7 @@ g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 
 	g_topology_assert();
 
-	G_NBD_DEBUG(G_NBD_TRACE, "%s", __func__);
+	CTR1(KTR_NBD, "%s", __func__);
 	if (pp != NULL)
 		return;
 	sc = gp->softc;
