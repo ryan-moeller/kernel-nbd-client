@@ -1850,6 +1850,8 @@ g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 	sc = gp->softc;
 	if (sc == NULL)
 		return;
+	sbuf_printf(sb, "%s<State>%s</State>\n", indent, sc->sc_nconns > 0 ?
+	    "CONNECTED" : "DISCONNECTED");
 	sbuf_printf(sb, "%s<Host>%s</Host>\n", indent, sc->sc_host);
 	sbuf_printf(sb, "%s<Port>%s</Port>\n", indent, sc->sc_port);
 	sbuf_printf(sb, "%s<Name>%s</Name>\n", indent, sc->sc_name);
