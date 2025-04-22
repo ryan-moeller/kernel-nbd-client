@@ -532,7 +532,18 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 				SOCK_SENDBUF_UNLOCK(so);
 				G_NBD_LOGREQ(G_NBD_INFO, bp, "%s disconnecting",
 				    __func__);
-				nbd_conn_degrade_state(nc,
+				/*
+				 * XXX: We shouldn't degrade here if we are soft
+				 * disconnecting, otherwise we can cause
+				 * in-flight bios with replies waiting in the
+				 * receive buffer to deliver errors.  So, this
+				 * is an open-coded variation of
+				 * nbd_conn_degrade_state() to only degrade if
+				 * we are in the connected state, meaning there
+				 * was some hard error.
+				 */
+				atomic_cmpset_int(&nc->nc_state,
+				    NBD_CONN_CONNECTED,
 				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
 				nbd_conn_remove_inflight_specific(nc, ni);
@@ -1682,7 +1693,6 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 		struct nbd_conn *nc;
 		int n = sc->sc_nconns;
 
-		/* TODO: scaling down is delivering errors, can we fix? */
 		SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 			nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 			if (--n == nconns)
