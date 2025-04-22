@@ -104,7 +104,6 @@ Providers:
    Mediasize: 4294967296 (4.0G)
    Sectorsize: 4096
    Mode: r0w0e0
-
 ```
 
 Disconnect the device `nbd0`:
