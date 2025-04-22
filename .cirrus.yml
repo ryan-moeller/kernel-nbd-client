@@ -30,15 +30,13 @@ task:
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/src.txz
     - tar xf ${WD}/src.txz -C / && rm ${WD}/src.txz
     # Check for WITNESS and INVARIANTS and add args for make when present.
-    - sysctl -n kern.conftxt
-      | sed -nE '/^options\t(WITNESS|INVARIANTS)$/s/options\t/-D/p'
-      | xargs -I @ -L 2 echo 'DEBUG_ARGS=DEBUG_FLAGS="-g -O0 @"'
-      | tee -a ${CIRRUS_ENV} >&2
+    - sysctl -n kern.conftxt | awk '
+        /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
+        END { print "DEBUG_FLAGS=-g -O0" opts }
+      ' | tee -a ${CIRRUS_ENV} >&2
   build_script:
-    # eval needed for proper variable expansion. Cirrus counts it as an empty
-    # arg when empty, but we want no args from it when empty.
-    - eval make ${DEBUG_ARGS} -j${CIRRUS_CPU}
-    - eval make ${DEBUG_ARGS} install
+    - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
+    - make DEBUG_FLAGS="${DEBUG_FLAGS}" install
   manlint_script:
     - make manlint
   messages_background_script:
@@ -127,9 +125,8 @@ task:
     - gnbd scale -c 2 ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
     - diskinfo -twic ${NBD}
-    # Test the lldb script if we're on a debug build.
-    - test -z "${DEBUG_ARGS}"
-      || lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
+    # Test the lldb script.
+    - lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
     # Clean up.
     - gnbd disconnect ${NBD}
     # Unset the NBD variable in the env.
@@ -166,9 +163,8 @@ task:
       ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
     - diskinfo -twic ${NBD}
-    # Test the lldb script if we're on a debug build.
-    - test -z "${DEBUG_ARGS}"
-      || lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
+    # Test the lldb script.
+    - lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
     # Clean up.
     - gnbd disconnect ${NBD}
     # Unset the NBD variable in the env.
