@@ -69,6 +69,7 @@ task:
         sysctl dev.isal.0.stats;
         sysctl kern.ipc.aio;
         sysctl vfs.aio;
+        lldb -b -o "script dofile 'nbdkit.lua'" -c /dev/mem /boot/kernel/kernel;
         lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel;
       done
   ca_info_file:
