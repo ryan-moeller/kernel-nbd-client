@@ -3,7 +3,7 @@
 --
 -- For live debugging:
 -- # lldb -c /dev/mem /boot/kernel/kernel
--- 
+--
 -- For post-mortem debugging:
 -- # lldb -c /var/crash/vmcore.last /boot/kernel/kernel
 --
