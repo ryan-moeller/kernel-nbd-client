@@ -249,33 +249,7 @@ intensive test, we can install fio:
 
 ```
 # pkg install fio
-# cat > nbd-test.fio <<EOF
-# Based on ssd-test.fio
-[global]
-bs=4k
-ioengine=posixaio
-iodepth=8
-direct=1
-runtime=60
-filename=/dev/nbd0
-
-[seq-read]
-rw=read
-stonewall
-
-[rand-read]
-rw=randread
-stonewall
-
-[seq-write]
-rw=write
-stonewall
-
-[rand-write]
-rw=randwrite
-stonewall
-EOF
-# fio ./nbd-test.fio
+# fio kernel-nbd-client/ci.fio --iodepth=8 --bsrange=512-1m --filename=/dev/nbd0
 ```
 
 Finally, the cleanup:
