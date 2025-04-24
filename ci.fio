@@ -2,6 +2,7 @@
 ioengine=posixaio
 direct=1
 runtime=30
+time_based
 
 [seq-read]
 rw=read
