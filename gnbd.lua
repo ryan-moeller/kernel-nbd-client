@@ -315,6 +315,12 @@ function bio_summary(bp)
 	return string.format("bio[%s<%s>%d:%d]", cmd, flags, offset, length)
 end
 
+function inflight_summary(ni)
+	local cookie = ni:GetChildMemberWithName("ni_cookie"):GetValueAsUnsigned()
+	local bio = ni:GetChildMemberWithName("ni_bio")
+	return string.format("(nbd_inflight) cookie=%d %s", cookie, bio_summary(bio))
+end
+
 function thread_summary(frame)
 	local thread = frame:GetThread()
 	local lines = {}
@@ -349,9 +355,7 @@ for sc, instance in pairs(instances) do
 		end
 		print(socket_summary(socket))
 		for ni in iter_inflight(nc) do
-			print(ni:Dereference())
-			local bio = ni:GetChildMemberWithName("ni_bio")
-			print(bio_summary(bio))
+			print(inflight_summary(ni))
 		end
 	end
 end
