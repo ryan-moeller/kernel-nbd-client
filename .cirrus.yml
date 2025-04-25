@@ -47,6 +47,8 @@ task:
     - gnbd load
     - sysctl kern.geom.nbd.debug=1
     - sysctl kern.ipc.tls.enable=1
+    # Avoid IP queue drops.
+    - sysctl net.inet.ip.intr_queue_maxlen=`sysctl -n net.isr.maxqlimit`
   ca_info_file:
     path: ${WD}/ca.info
     from_contents: |
