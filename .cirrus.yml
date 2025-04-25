@@ -25,6 +25,8 @@ task:
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
   build_setup_script:
     - mkdir ${WD}
+    - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel.txz
+    - tar xf ${WD}/kernel.txz -C / && rm ${WD}/kernel.txz
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel-dbg.txz
     - tar xf ${WD}/kernel-dbg.txz -C / && rm ${WD}/kernel-dbg.txz
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/src.txz
