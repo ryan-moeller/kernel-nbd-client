@@ -23,6 +23,9 @@ task:
     WD: /tmp/wd
     PATH: /usr/local/sbin:${PATH}
     ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
+  sysctl_script:
+    - cat /etc/sysctl.conf
+    - sysctl -a
   build_setup_script:
     - mkdir ${WD}
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel.txz
