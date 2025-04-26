@@ -127,6 +127,8 @@ task:
     - diskinfo -twic ${NBD} >&2
     # Test with 2 connections (scaling down).
     - gnbd scale -c 2 ${NBD}
+    # Scaling down happens asynchronously, connections need time to close.
+    - sleep 1
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
     - diskinfo -twic ${NBD} >&2
     # Test the lldb script.
@@ -165,6 +167,8 @@ task:
       -C ${WD}/client-cert.pem
       -K ${WD}/client-key.pem
       ${NBD}
+    # Scaling down happens asynchronously, connections need time to close.
+    - sleep 1
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
     - diskinfo -twic ${NBD} >&2
     # Test the lldb script.
