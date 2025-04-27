@@ -112,21 +112,21 @@ task:
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   test_notls_script:
     # Test with 1 connection.
-    - gnbd status
+    - gnbd status >&2
     - gnbd status | egrep -q "^${NBD}(\s+)"
-    - gnbd list
+    - gnbd list >&2
     - gnbd list ${NBD} | egrep -q "^Geom name:(\s+)${NBD}$"
     - gnbd list ${NBD} | egrep -q "^TLS:(\s+)no$"
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)1$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test with 4 conections (scaling up).
     - gnbd scale -c 4 ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)4$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test with 2 connections (scaling down).
     - gnbd scale -c 2 ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test the lldb script.
     - lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
     # Clean up.
@@ -142,13 +142,13 @@ task:
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
   test_tls_script:
     # Test with 1 connection.
-    - gnbd status
+    - gnbd status >&2
     - gnbd status | egrep -q "^${NBD}(\s+)"
-    - gnbd list
+    - gnbd list >&2
     - gnbd list ${NBD} | egrep -q "^Geom name:(\s+)${NBD}$"
     - gnbd list ${NBD} | egrep -q "^TLS:(\s+)yes$"
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)1$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test with 4 conections (scaling up).
     - gnbd scale -c 4
       -A ${WD}/ca-cert.pem
@@ -156,7 +156,7 @@ task:
       -K ${WD}/client-key.pem
       ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)4$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test with 2 connections (scaling down).
     - gnbd scale -c 2
       -A ${WD}/ca-cert.pem
@@ -164,7 +164,7 @@ task:
       -K ${WD}/client-key.pem
       ${NBD}
     - gnbd list ${NBD} | egrep -q "^Connections:(\s+)2$"
-    - diskinfo -twic ${NBD}
+    - diskinfo -twic ${NBD} >&2
     # Test the lldb script.
     - lldb -b -o "script dofile 'gnbd.lua'" -c /dev/mem /boot/kernel/kernel
     # Clean up.
