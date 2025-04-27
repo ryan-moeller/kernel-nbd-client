@@ -45,6 +45,8 @@ task:
     - top -SHIPnz -s 60 -d infinity
   netstat_background_script:
     - netstat -w 60 -I lo0 -dnh
+  ifconfig_script:
+    - ifconfig
   load_script:
     - gnbd load
     - sysctl kern.geom.nbd.debug=1
