@@ -273,6 +273,121 @@ socket[
 ]] .. "]", options, state, error, rerror, snd, rcv)
 end
 
+function mbuf_type_str(m)
+	local type = m:GetChildMemberWithName("m_type"):GetValueAsUnsigned()
+	local definitions = { [0] = "NOTMBUF",
+	    [1] = "DATA", -- 2, 3 not defined
+	    [4] = "VENDOR1", [5] = "VENDOR2",
+	    [6] = "VENDOR3", [7] = "VENDOR4",
+	    [8] = "SONAME",
+	    [9] = "EXP1", [10] = "EXP2",
+	    [11] = "EXP3", [12] = "EXP4",
+	    -- 13 not defined
+	    [14] = "CONTROL", [15] = "EXTCONTROL",
+	    [16] = "OOBDATA", [255] = "NOINIT",
+	}
+	return definitions[type] or tostring(type)
+end
+
+function mbuf_flags_str(m, sep)
+	local flags = m:GetChildMemberWithName("m_flags")
+	local definitions = {
+		EXT         = 0x00000001,
+		PKTHDR      = 0x00000002,
+		EOR         = 0x00000004,
+		RDONLY      = 0x00000008,
+		BCAST       = 0x00000010,
+		MCAST       = 0x00000020,
+		PROMISC     = 0x00000040,
+		VLANTAG     = 0x00000080,
+		EXTPG       = 0x00000100,
+		NOFREE      = 0x00000200,
+		TSTMP       = 0x00000400,
+		TSTMP_HPREC = 0x00000800,
+		TSTMP_LRO   = 0x00001000,
+		PROTO1      = 0x00002000,
+		PROTO2      = 0x00004000,
+		PROTO3      = 0x00008000,
+		PROTO4      = 0x00010000,
+		PROTO5      = 0x00020000,
+		PROTO6      = 0x00040000,
+		PROTO7      = 0x00080000,
+		PROTO8      = 0x00100000,
+		PROTO9      = 0x00200000,
+		PROTO10     = 0x00400000,
+		PROTO11     = 0x00800000,
+	}
+	return bits_str(flags, definitions, sep)
+end
+
+function m_ext_type_str(ext)
+	local type = ext:GetChildMemberWithName("ext_type"):GetValueAsUnsigned()
+	local definitions = { "CLUSTER", "SFBUF",
+	    "JUMBOP", "JUMBO9", "JUMBO16",
+	    "PACKET", "MBUF", "RXRING", "CTL",
+	    [224] = "VENDOR1", [225] = "VENDOR2",
+	    [226] = "VENDOR3", [227] = "VENDOR4",
+	    [244] = "EXP1", [245] = "EXP2",
+	    [246] = "EXP3", [247] = "EXP4",
+	    [252] = "NET_DRV", [253] = "MOD_TYPE",
+	    [254] = "DISPOSABLE", [255] = "EXTREF"
+	}
+	return definitions[type] or tostring(type)
+end
+
+function m_ext_flags_str(ext, sep)
+	local flags = ext:GetChildMemberWithName("ext_flags")
+	local definitions = {
+		EMBREF  = 0x000001,
+		EXTREF  = 0x000002,
+		NOFREE  = 0x000010,
+		VENDOR1 = 0x010000,
+		VENDOR2 = 0x020000,
+		VENDOR3 = 0x040000,
+		VENDOR4 = 0x080000,
+		EXP1    = 0x100000,
+		EXP2    = 0x200000,
+		EXP3    = 0x400000,
+		EXP4    = 0x800000,
+	}
+	return bits_str(flags, definitions, sep)
+end
+
+function m_ext_summary(ext)
+	local size = ext:GetChildMemberWithName("ext_size"):GetValueAsUnsigned()
+	local type = m_ext_type_str(ext)
+	local flags = m_ext_flags_str(ext, "|")
+	return string.format("m_ext[size<%u>,type<%s>,flags<%s>]",
+	    size, type, flags)
+end
+
+function mbuf_summary(m)
+	local len = m:GetChildMemberWithName("m_len"):GetValueAsUnsigned()
+	local type = mbuf_type_str(m)
+	local flags = mbuf_flags_str(m, "|")
+	if flags:find("EXT") then
+		local ext = m:GetChildMemberWithName("m_ext")
+		return string.format("mbuf[len<%u>,type<%s>,flags<%s>,ext<%s>]",
+		    len, type, flags, m_ext_summary(ext))
+	else
+		return string.format("mbuf[len<%u>,type<%s>,flags<%s>]",
+		    len, type, flags)
+	end
+end
+
+function sockbuf_details(sb)
+	local mbcnt = sb:GetChildMemberWithName("sb_mbcnt"):GetValueAsUnsigned()
+	local mbmax = sb:GetChildMemberWithName("sb_mbmax"):GetValueAsUnsigned()
+	local mb = sb:GetChildMemberWithName("sb_mb")
+	local mbufs = {}
+	while mb:GetAddress():GetOffset() ~= 0 do
+		table.insert(mbufs, mbuf_summary(mb))
+		mb = mb:GetChildMemberWithName("m_next")
+	end
+	return string.format("sockbuf[mbcnt<%u>,mbmax<%u>,#mb<%u>]\n%s",
+	    mbcnt, mbmax, #mbufs, table.concat(mbufs, "\n"))
+end
+
 function bio_cmd_str(bp)
 	local cmd = bp:GetChildMemberWithName("bio_cmd"):GetValueAsSigned()
 	local definitions = {
@@ -342,6 +457,8 @@ for sc, instance in pairs(instances) do
 		local state = nc:GetChildMemberWithName("nc_state")
 		local seq = nc:GetChildMemberWithName("nc_seq")
 		local socket = nc:GetChildMemberWithName("nc_socket")
+		local snd = socket:GetChildMemberWithName("so_snd")
+		local rcv = socket:GetChildMemberWithName("so_rcv")
 		print(state, seq)
 		if frames.sender then
 			print(thread_summary(frames.sender))
@@ -353,7 +470,13 @@ for sc, instance in pairs(instances) do
 		else
 			print("no receiver thread")
 		end
+		print("Socket summary:")
 		print(socket_summary(socket))
+		print("Send buffer details:")
+		print(sockbuf_details(snd))
+		print("Receive buffer details:")
+		print(sockbuf_details(rcv))
+		print("In-flight requests:")
 		for ni in iter_inflight(nc) do
 			print(inflight_summary(ni))
 		end
