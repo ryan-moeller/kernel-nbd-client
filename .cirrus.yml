@@ -182,6 +182,12 @@ task:
     - mkdir traces
     - mount -t tmpfs tmp ./traces
     - kldload dtraceall
+    # GCE images have ifconfig_DEFAULT="SYNCDHCP mtu 1460" which makes lo0 pass
+    # loopback traffic through JUMBOP mbufs with less than half the space used.
+    # This means socket buffers run out of space with nowhere near enough actual
+    # data present, and generally tanks performance.  Restore the default MTU
+    # only while gathering profiles so we have coverage for regressions.
+    - ifconfig lo0 mtu 16384
   trace_connect_notls_script:
     - gnbd connect -c 4 localhost
       | xargs -I @ echo NBD=@ | tee -a ${CIRRUS_ENV} >&2
