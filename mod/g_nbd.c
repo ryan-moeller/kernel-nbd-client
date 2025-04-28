@@ -719,6 +719,14 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			 */
 			if (available > 0 && sbspace(&so->so_rcv) <= 0)
 				break;
+			/*
+			 * XXX: We may have a complete TLS record in the receive
+			 * buffer and not enough space for the next record.  Get
+			 * it out of the way.
+			 */
+			if (so->so_rcv.sb_mbtail != NULL &&
+			    (so->so_rcv.sb_mbtail->m_flags & M_EOR) != 0)
+				break;
 			so->so_rcv.sb_lowat = MIN(len, so->so_rcv.sb_hiwat);
 			cv_wait(&nc->nc_receive_cv, SOCK_RECVBUF_MTX(so));
 			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
@@ -1223,6 +1231,8 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
+	if (soreadabledata(so))
+		cv_signal(&nc->nc_receive_cv);
 	/*
 	 * XXX: We may have to signal with sbavail() < lowat if mb efficiency is
 	 * very bad.  For example, GCE images have mtu 1460 on lo0 by default,
@@ -1237,8 +1247,15 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 	 * TLS records and none is available yet, so we must still check that
 	 * some data is available before signaling the receive thread.
 	 */
-	if (soreadabledata(so) || (sbavail(&so->so_rcv) > 0 &&
-	    sbspace(&so->so_rcv) <= 0))
+	else if (sbavail(&so->so_rcv) > 0 && sbspace(&so->so_rcv) <= 0)
+		cv_signal(&nc->nc_receive_cv);
+	/*
+	 * XXX: We may have a complete TLS record in the receive
+	 * buffer and not enough space for the next record.  Get
+	 * it out of the way.
+	 */
+	else if (so->so_rcv.sb_mbtail != NULL &&
+	    (so->so_rcv.sb_mbtail->m_flags & M_EOR) != 0)
 		cv_signal(&nc->nc_receive_cv);
 	return (SU_OK);
 }
