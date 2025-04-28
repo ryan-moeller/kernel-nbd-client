@@ -132,6 +132,12 @@ To connect using TLS and requiring a trusted certificate authority:
 # gnbd connect -A cacert.pem -C cert.pem -K key.pem nbdserver
 nbd2
 ```
+To connect using a UNIX-domain socket:
+
+```
+# gnbd connect /path/to/server.socket
+nbd3
+```
 
 To scale a device using TLS:
 

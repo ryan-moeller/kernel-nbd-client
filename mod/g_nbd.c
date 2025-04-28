@@ -9,6 +9,7 @@
 #include <sys/capsicum.h>
 #include <sys/condvar.h>
 #include <sys/counter.h>
+#include <sys/domain.h>
 #include <sys/file.h>
 #include <sys/kthread.h>
 #include <sys/ktr.h>
@@ -1386,18 +1387,23 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 		fdrop(fp, td);
 		/*
 		 * Set the buffer reservations while we have the socket handy.
+		 *
+		 * XXX: UNIX domain sockets will stall if our buffers are bigger
+		 * than the server's, so we have to keep the defaults.
 		 */
-		error = soreserve(so, sendspace, recvspace);
-		if (error != 0) {
-			PROC_UNLOCK(td->td_proc);
-			for (int j = 0; j < i; j++)
-				soclose(sockets[j]);
-			g_free(sockets);
-			gctl_error(req, "soreserve failed (%d)", error);
-			return (NULL);
+		if (so->so_proto->pr_domain->dom_family != AF_LOCAL) {
+			error = soreserve(so, sendspace, recvspace);
+			if (error != 0) {
+				PROC_UNLOCK(td->td_proc);
+				for (int j = 0; j < i; j++)
+					soclose(sockets[j]);
+				g_free(sockets);
+				gctl_error(req, "soreserve failed (%d)", error);
+				return (NULL);
+			}
+			so->so_snd.sb_flags |= SB_AUTOSIZE;
+			so->so_rcv.sb_flags |= SB_AUTOSIZE;
 		}
-		so->so_snd.sb_flags |= SB_AUTOSIZE;
-		so->so_rcv.sb_flags |= SB_AUTOSIZE;
 		sockets[i] = so;
 	}
 	PROC_UNLOCK(td->td_proc);

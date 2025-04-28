@@ -214,23 +214,25 @@ nbd_client_connect(struct nbd_client *client)
 	}
 	on = 1;
 	for (ai = first_ai; ai != NULL; ai = ai->ai_next) {
-		s = socket(ai->ai_family, SOCK_STREAM, IPPROTO_TCP);
+		s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (s == -1) {
 			what = "socket";
 			error = errno;
 			continue;
 		}
-		if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on))
-		    == -1) {
-			what = "TCP_NODELAY";
-			goto close;
+		if (ai->ai_family != AF_UNIX) {
+			if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on,
+			    sizeof(on)) == -1) {
+				what = "TCP_NODELAY";
+				goto close;
+			}
+			if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &on,
+			    sizeof(on)) == -1) {
+				what = "SO_KEEPALIVE";
+				goto close;
+			}
 		}
-		if (setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on))
-		    == -1) {
-			what = "SO_KEEPALIVE";
-			goto close;
-		}
-		if (connect(s, ai->ai_addr, sizeof(*ai->ai_addr)) == -1) {
+		if (connect(s, ai->ai_addr, ai->ai_addrlen) == -1) {
 			what = "connect";
 			goto close;
 		}
