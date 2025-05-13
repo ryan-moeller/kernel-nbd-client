@@ -146,6 +146,13 @@ To scale a device using TLS:
 # gnbd scale -c 4 -A cacert.pem -C cert.pem -K key.pem nbd2
 ```
 
+To automatically reconnect failed connections (e.g. due to server reboot) every
+10 seconds to keep 2 connections alive:
+
+```
+# daemon -R 10 gnbd scale -c 2 nbd0
+```
+
 To test commands without installing outside of the source directory:
 
 ```

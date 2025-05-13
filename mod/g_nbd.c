@@ -1024,18 +1024,6 @@ bio_queue_takefirst(struct bio_queue *queue)
 }
 
 static inline void
-g_nbd_drain_queue(struct g_nbd_softc *sc)
-{
-	struct bio *bp;
-
-	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
-	mtx_lock(&sc->sc_queue_mtx);
-	while ((bp = bio_queue_takefirst(&sc->sc_queue)) != NULL)
-		g_io_deliver(bp, ENXIO);
-	mtx_unlock(&sc->sc_queue_mtx);
-}
-
-static inline bool
 g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 {
 	bool last;
@@ -1049,6 +1037,8 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 	SLIST_REMOVE(&sc->sc_connections, nc, nbd_conn, nc_connections);
 	last = --sc->sc_nconns == 0;
 	mtx_unlock(&sc->sc_conns_mtx);
+	if (last)
+		wakeup(&sc->sc_nconns);
 
 	sx_xlock(&g_nbd_lock);
 	if (--g_nbd_nconns == 0)
@@ -1064,39 +1054,6 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 	cv_destroy(&nc->nc_send_cv);
 	mtx_destroy(&nc->nc_inflight_mtx);
 	g_free(nc);
-	return (last);
-}
-
-static inline bool
-bio_queue_empty(struct bio_queue *queue)
-{
-	return (TAILQ_EMPTY(queue));
-}
-
-static inline void
-g_nbd_free(struct g_nbd_softc *sc)
-{
-	struct g_geom *gp = sc->sc_geom;
-
-	KASSERT(sc->sc_nconns == 0, ("tried to free with connections"));
-	KASSERT(bio_queue_empty(&sc->sc_queue),
-	    ("tried to free with bios in queue"));
-
-	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
-	g_topology_lock();
-	gp->softc = NULL;
-	g_wither_geom(gp, ENXIO);
-	g_topology_unlock();
-	free_unr(g_nbd_unit, sc->sc_unit);
-	sx_destroy(&sc->sc_flush_lock);
-	mtx_destroy(&sc->sc_conns_mtx);
-	mtx_destroy(&sc->sc_queue_mtx);
-	g_free(__DECONST(char *, sc->sc_description));
-	g_free(__DECONST(char *, sc->sc_name));
-	g_free(__DECONST(char *, sc->sc_port));
-	g_free(__DECONST(char *, sc->sc_host));
-	g_free(sc);
-	CTR2(KTR_NBD, "%s sc=%p completed", __func__, sc);
 }
 
 static void
@@ -1183,13 +1140,7 @@ nbd_conn_sender(void *arg)
 	sema_wait(&nc->nc_receiver_done);
 	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
-	if (g_nbd_remove_conn(sc, nc)) {
-		G_NBD_LOG(G_NBD_INFO, "%s last connection closed", __func__);
-		g_wither_provider(sc->sc_provider, ENXIO);
-		/* TODO: option to save the queue for a rescue operation */
-		g_nbd_drain_queue(sc);
-		g_nbd_free(sc);
-	}
+	g_nbd_remove_conn(sc, nc);
 	kthread_exit();
 }
 
@@ -1270,14 +1221,6 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 {
 	struct nbd_conn *nc;
 	int error;
-
-	/*
-	 * TODO: Allow recovery when all connections have failed.  For now we
-	 * must assume the device is in the process of shutting down and cannot
-	 * continue.
-	 */
-	if (!first && sc->sc_nconns == 0)
-		return (ENXIO);
 
 	nc = g_malloc(sizeof(*nc), M_WAITOK | M_ZERO);
 	nc->nc_softc = sc;
@@ -1642,7 +1585,7 @@ g_nbd_find_geom(struct g_class *mp, const char *name)
 
 	LIST_FOREACH(gp, &mp->geom, geom) {
 		sc = gp->softc;
-		if (sc == NULL || sc->sc_nconns == 0)
+		if (sc == NULL)
 			continue;
 		if (strcmp(gp->name, name) == 0)
 			break;
@@ -1728,6 +1671,45 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	g_free(sockets);
 }
 
+static inline void
+g_nbd_drain_queue(struct g_nbd_softc *sc)
+{
+	struct bio *bp;
+
+	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
+	mtx_lock(&sc->sc_queue_mtx);
+	while ((bp = bio_queue_takefirst(&sc->sc_queue)) != NULL)
+		g_io_deliver(bp, ENXIO);
+	mtx_unlock(&sc->sc_queue_mtx);
+}
+
+static inline bool
+bio_queue_empty(struct bio_queue *queue)
+{
+	return (TAILQ_EMPTY(queue));
+}
+
+static inline void
+g_nbd_free(struct g_nbd_softc *sc)
+{
+	KASSERT(sc->sc_nconns == 0, ("tried to free with connections"));
+	KASSERT(bio_queue_empty(&sc->sc_queue),
+	    ("tried to free with bios in queue"));
+	g_topology_assert();
+
+	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
+	g_wither_geom(sc->sc_geom, ENXIO);
+	free_unr(g_nbd_unit, sc->sc_unit);
+	sx_destroy(&sc->sc_flush_lock);
+	mtx_destroy(&sc->sc_conns_mtx);
+	mtx_destroy(&sc->sc_queue_mtx);
+	g_free(__DECONST(char *, sc->sc_description));
+	g_free(__DECONST(char *, sc->sc_name));
+	g_free(__DECONST(char *, sc->sc_port));
+	g_free(__DECONST(char *, sc->sc_host));
+	g_free(sc);
+}
+
 static void
 g_nbd_destroy(struct g_nbd_softc *sc)
 {
@@ -1736,12 +1718,29 @@ g_nbd_destroy(struct g_nbd_softc *sc)
 	g_topology_assert();
 
 	CTR1(KTR_NBD, "%s", __func__);
+	/* Prevent another thread from racing when we drop the lock below. */
+	sc->sc_geom->softc = NULL;
+	/*
+	 * Drop topology_lock before unbounded gnbd:destroy sleep.  Nothing
+	 * below needs the lock until we get to g_nbd_free().
+	 */
+	g_topology_unlock();
+	g_wither_provider(sc->sc_provider, ENXIO);
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections)
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
-	mtx_unlock(&sc->sc_conns_mtx);
 	wakeup(&sc->sc_queue);
-	/* The sender threads will take care of the cleanup. */
+	while (sc->sc_nconns > 0)
+		mtx_sleep(&sc->sc_nconns, &sc->sc_conns_mtx, PRIBIO,
+		    "gnbd:destroy", 0);
+	mtx_unlock(&sc->sc_conns_mtx);
+	g_nbd_drain_queue(sc);
+	/*
+	 * Must return with topology_lock held and g_nbd_free() needs it for
+	 * g_wither_geom(), so retake the lock here.
+	 */
+	g_topology_lock();
+	g_nbd_free(sc);
 }
 
 static void
@@ -1794,7 +1793,6 @@ g_nbd_ctl_config(struct gctl_req *req, struct g_class *mp, const char *verb)
 		g_nbd_ctl_disconnect(req, mp);
 		return;
 	}
-	/* TODO: rescue? */
 
 	gctl_error(req, "Unknown verb.");
 }
@@ -1809,7 +1807,7 @@ g_nbd_ctl_destroy(struct gctl_req *req __unused, struct g_class *mp __unused,
 
 	CTR1(KTR_NBD, "%s", __func__);
 	g_nbd_destroy(sc);
-	return (EBUSY);
+	return (0);
 }
 
 static void

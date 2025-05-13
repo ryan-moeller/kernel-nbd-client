@@ -122,6 +122,12 @@ and a CA certificate for verifying certificates may optionally be
 provided using
 .Fl A ,
 otherwise the default system root CAs are used.
+.Pp
+The
+.Cm scale
+command can also be used to recover from failed connections.
+When all connections for a device have failed, the provider will persist and can
+resume normal operation when new connections are established.
 .It Cm disconnect
 Disconnect and remove the given provider.
 .It Cm help

@@ -936,8 +936,9 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Invalid config (missing Connections).");
 		goto free;
 	}
+	errno = 0;
 	nsockets = strtol(connections, NULL, 10);
-	if (nsockets == 0) {
+	if (errno != 0) {
 		gctl_error(req, "Invalid config (invalid Connections).");
 		goto free;
 	}
