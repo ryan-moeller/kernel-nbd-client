@@ -153,13 +153,11 @@ The default value is shown next to each variable.
 Debug level of the
 .Nm NBD
 GEOM class.
-This can be set to a number between 0 and 5 inclusive.
+This can be set to a number between 0 and 3 inclusive.
 If set to 0, minimal debug information is printed.
-If set to 5, the maximum amount of debug information is printed.
-.It Va kern.geom.nbd.maxpayload : No 262144 Pq 256 kiB
+If set to 3, the maximum amount of debug information is printed.
+.It Va kern.geom.nbd.maxpayload : No 33554432 Pq 32 MiB
 Upper limit on the size in bytes of a single transfer over the network.
-.Pp
-Note: connections may also be limited by standard socket buffer limits.
 .It Va kern.geom.nbd.sendspace : No 1572864 Pq 1536 kiB
 Size of socket send buffer reservation per connection.
 .Pp
