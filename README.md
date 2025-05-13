@@ -17,7 +17,8 @@ This client supports the following noteworthy features:
   network-backed devices.
 * Supports using multiple connections to the NBD server to parallelize commands.
 * Supports optional TLS encryption using ktls(4).
-* Zero copies are performed for writes where possible.  Reads need some work.
+* Zero copies are performed for writes where possible.  Work is needed to
+  support cxgbe(4) TCP-offload module DDP for zero-copy reads.
 
 ## Prerequisites
 

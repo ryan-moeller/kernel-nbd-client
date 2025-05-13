@@ -1,7 +1,7 @@
 .\" Copyright (c) 2025 Ryan Moeller
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd April 28, 2025
+.Dd May 13, 2025
 .Dt GNBD 8
 .Os
 .Sh NAME
@@ -80,7 +80,10 @@ Supports using multiple connections to the NBD server to parallelize commands.
 Supports optional TLS encryption using
 .Xr ktls 4 .
 .It
-It is fast - zero copies are performed where possible.
+Zero copies are performed for writes where possible.
+Work is needed to support
+.Xr cxgbe 4
+TCP-offload module DDP for zero-copy reads.
 .El
 .Pp
 The first argument to
@@ -202,6 +205,7 @@ Disconnect the previous examples:
 # gnbd disconnect nbd1
 .Ed
 .Sh SEE ALSO
+.Xr cxgbe 4 ,
 .Xr geom 4 ,
 .Xr ktls 4 ,
 .Xr loader.conf 5 ,
