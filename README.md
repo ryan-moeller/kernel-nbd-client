@@ -38,7 +38,7 @@ ktls(4) is enabled by default on 15.0-CURRENT.
 
 ## Building and Installing
 
-To build and install for a production kernel:
+Build and install for a production kernel:
 
 ```
 # make
@@ -52,7 +52,7 @@ be overridden:
 # make SRCTOP=/path/to/my/freebsd
 ```
 
-To build for a debug kernel with WITNESS and INVARIANTS:
+Build for a debug kernel with WITNESS and INVARIANTS:
 
 ```
 # make DEBUG_FLAGS="-g -O0 -DWITNESS -DINVARIANTS"
@@ -113,40 +113,40 @@ Disconnect the device `nbd0`:
 # gnbd disconnect nbd0
 ```
 
-To connect to a named export:
+Connect to a named export:
 
 ```
 # gnbd connect -n myexport nbdserver
 nbd0
 ```
 
-To connect to a non-standard port:
+Connect to a non-standard port:
 
 ```
 # gnbd connect -p 1234 nbdserver
 nbd1
 ```
 
-To connect using TLS and requiring a trusted certificate authority:
+Connect using TLS and requiring a trusted certificate authority:
 
 ```
 # gnbd connect -A cacert.pem -C cert.pem -K key.pem nbdserver
 nbd2
 ```
-To connect using a UNIX-domain socket:
+Connect using a UNIX-domain socket:
 
 ```
 # gnbd connect /path/to/server.socket
 nbd3
 ```
 
-To scale a device using TLS:
+Scale a device using TLS:
 
 ```
 # gnbd scale -c 4 -A cacert.pem -C cert.pem -K key.pem nbd2
 ```
 
-To mount an NBD-backed root filesystem from an export matching the hostname:
+Mount an NBD-backed root filesystem from an export matching the hostname:
 
 ```
 # gnbd connect -c 2 -n $(hostname) nbdserver
@@ -160,14 +160,14 @@ nbd0
 # reboot -r
 ```
 
-To automatically reconnect failed connections (e.g. due to server reboot) every
-10 seconds to keep 2 connections alive:
+Automatically reconnect failed connections (e.g. due to server reboot) every 10
+seconds to keep 2 connections alive:
 
 ```
 # daemon -R 10 gnbd scale -c 2 nbd0
 ```
 
-To test commands without installing outside of the source directory:
+Test commands without installing outside of the source directory:
 
 ```
 # make DEBUG_FLAGS="-g -O0 -DINVARIANTS -DWITNESS"
