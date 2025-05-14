@@ -146,6 +146,20 @@ To scale a device using TLS:
 # gnbd scale -c 4 -A cacert.pem -C cert.pem -K key.pem nbd2
 ```
 
+To mount an NBD-backed root filesystem from an export matching the hostname:
+
+```
+# gnbd connect -c 2 -n $(hostname) nbdserver
+nbd0
+# gpart show nbd0
+=>      40  20971440  nbd0  GPT  (10G)
+        40        24        - free -  (12K)
+        64  20971392     1  freebsd-ufs  (10G)
+  20971456        24        - free -  (12K)
+# kenv vfs.root.mountfrom=ufs:/dev/nbd0p1
+# reboot -r
+```
+
 To automatically reconnect failed connections (e.g. due to server reboot) every
 10 seconds to keep 2 connections alive:
 
