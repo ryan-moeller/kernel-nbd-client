@@ -1005,18 +1005,75 @@ nbd_conn_close(struct nbd_conn *nc)
 	soclose(so);
 }
 
+static inline struct bio *
+nbd_inflight_cancel(struct nbd_inflight *ni)
+{
+	struct bio *bp = ni->ni_bio;
+	bool last __diagused;
+
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
+	last = refcount_release(&ni->ni_refs);
+	KASSERT(last, ("nbd_inflight %p still referenced", ni));
+	uma_zfree(g_nbd_inflight_zone, ni);
+	return (bp);
+}
+
+static inline void
+bio_queue_init(struct bio_queue *queue)
+{
+	TAILQ_INIT(queue);
+}
+
+static inline void
+bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
+{
+	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
+}
+
+static inline bool
+bio_queue_empty(struct bio_queue *queue)
+{
+	return (TAILQ_EMPTY(queue));
+}
+
+/* q1 <- q2 + q1 */
+static inline void
+bio_queue_concat_front(struct bio_queue *queue1, struct bio_queue *queue2)
+{
+	TAILQ_CONCAT(queue2, queue1, bio_queue);
+	TAILQ_SWAP(queue2, queue1, bio, bio_queue);
+}
+
 static inline void
 nbd_conn_drain_inflight(struct nbd_conn *nc)
 {
+	struct g_nbd_softc *sc = nc->nc_softc;
 	struct nbd_inflight *ni;
+	struct bio_queue tmp;
+	struct bio *bp;
+	bool first;
 
 	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
+	bio_queue_init(&tmp);
 	mtx_lock(&nc->nc_inflight_mtx);
 	while ((ni = TAILQ_FIRST(&nc->nc_inflight)) != NULL) {
 		TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
-		nbd_inflight_deliver(ni, ENXIO);
+		bp = nbd_inflight_cancel(ni);
+		bio_queue_insert_tail(&tmp, bp);
 	}
 	mtx_unlock(&nc->nc_inflight_mtx);
+	if (!bio_queue_empty(&tmp)) {
+		/*
+		 * Put the bios back at the front of the queue so they can be
+		 * handled by another connection.
+		 */
+		mtx_lock(&sc->sc_queue_mtx);
+		first = bio_queue_empty(&sc->sc_queue);
+		bio_queue_concat_front(&sc->sc_queue, &tmp);
+		mtx_unlock(&sc->sc_queue_mtx);
+		if (first)
+			wakeup(&sc->sc_queue);
+	}
 }
 
 static inline struct bio *
@@ -1379,12 +1436,6 @@ g_nbd_ctl_steal_sockets(struct gctl_req *req, int nsockets)
 	return (sockets);
 }
 
-static inline void
-bio_queue_init(struct bio_queue *queue)
-{
-	TAILQ_INIT(queue);
-}
-
 static void
 g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 {
@@ -1715,12 +1766,6 @@ g_nbd_drain_queue(struct g_nbd_softc *sc)
 	mtx_unlock(&sc->sc_queue_mtx);
 }
 
-static inline bool
-bio_queue_empty(struct bio_queue *queue)
-{
-	return (TAILQ_EMPTY(queue));
-}
-
 static inline void
 g_nbd_free(struct g_nbd_softc *sc)
 {
@@ -1868,12 +1913,6 @@ g_nbd_fini(struct g_class *mp __unused)
 	uma_zdestroy(g_nbd_inflight_zone);
 	delete_unrhdr(g_nbd_unit);
 	sx_destroy(&g_nbd_lock);
-}
-
-static inline void
-bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
-{
-	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
 }
 
 static inline bool
