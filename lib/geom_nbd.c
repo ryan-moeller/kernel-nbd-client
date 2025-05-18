@@ -603,7 +603,7 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 					break;
 				default:
 					gctl_error(req,
-					    "Negotiation failed: %*s",
+					    "Negotiation failed: %.*s",
 					    reply.length, buf);
 					break;
 				}
@@ -643,7 +643,8 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 			struct nbd_info_name *name = (void *)buf;
 			char *namebuf, *namep = (void *)(name + 1);
 
-			asprintf(&namebuf, "%*s", reply.length - 2, namep);
+			asprintf(&namebuf, "%.*s",
+			    reply.length - (int)sizeof(*name), namep);
 			assert(namebuf != NULL);
 			free(__DECONST(char *, client->name));
 			client->name = namebuf;
@@ -653,7 +654,8 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 			struct nbd_info_description *desc = (void *)buf;
 			char *descbuf, *descp = (void *)(desc + 1);
 
-			asprintf(&descbuf, "%*s", reply.length - 2, descp);
+			asprintf(&descbuf, "%.*s",
+			    reply.length - (int)sizeof(*desc), descp);
 			assert(descbuf != NULL);
 			free(__DECONST(char *, client->description));
 			client->description = descbuf;
