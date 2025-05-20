@@ -232,6 +232,10 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 	mtx_unlock(&nc->nc_inflight_mtx);
+	/*
+	 * FIXME: This is incorrect, yet necessary for now.
+	 * Need a way to signal failure to the flush.
+	 */
 	if (__predict_false(atomic_load_bool(&nc->nc_softc->sc_flushing))) {
 		switch (ni->ni_bio->bio_cmd) {
 		case BIO_DELETE:
@@ -1059,6 +1063,19 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 	while ((ni = TAILQ_FIRST(&nc->nc_inflight)) != NULL) {
 		TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
 		bp = nbd_inflight_cancel(ni);
+		/*
+		 * FIXME: This is incorrect, yet necessary for now.
+		 * Need a way to reissue the flush in the correct position in
+		 * the queue.
+		 */
+		if (__predict_false(atomic_load_bool(&sc->sc_flushing))) {
+			switch (bp->bio_cmd) {
+			case BIO_DELETE:
+			case BIO_WRITE:
+				/* XXX: uses address only, not accessed */
+				wakeup_one(ni);
+			}
+		}
 		bio_queue_insert_tail(&tmp, bp);
 	}
 	mtx_unlock(&nc->nc_inflight_mtx);
