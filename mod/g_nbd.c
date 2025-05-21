@@ -9,6 +9,7 @@
 #include <sys/capsicum.h>
 #include <sys/condvar.h>
 #include <sys/counter.h>
+#include <sys/devctl.h>
 #include <sys/domain.h>
 #include <sys/file.h>
 #include <sys/kthread.h>
@@ -1064,6 +1065,7 @@ nbd_conn_sender(void *arg)
 	struct socket *so = nc->nc_socket;
 	struct nbd_inflight *ni;
 	struct bio *bp;
+	bool notify;
 
 	CTR3(KTR_NBD, "%s sc=%p nc=%p", __func__, sc, nc);
 
@@ -1132,14 +1134,28 @@ nbd_conn_sender(void *arg)
 			nbd_conn_send(nc, ni);
 		}
 	}
-	if (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING)
+	if (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
 		nbd_conn_soft_disconnect(nc);
-	else
+		notify = false;
+	} else {
 		socantrcvmore(so);
+		notify = true;
+	}
 	cv_signal(&nc->nc_receive_cv);
 	sema_wait(&nc->nc_receiver_done);
 	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
+	/* Only notify of unintentional disconnects. */
+	if (notify) {
+		struct sbuf *sb;
+
+		sb = sbuf_new_auto();
+		sbuf_printf(sb, "geom=%s", sc->sc_geom->name);
+		if (sbuf_finish(sb) == 0)
+			devctl_notify("GEOM", "NBD", "DISCONNECTED",
+			    sbuf_data(sb));
+		sbuf_delete(sb);
+	}
 	g_nbd_remove_conn(sc, nc);
 	kthread_exit();
 }
