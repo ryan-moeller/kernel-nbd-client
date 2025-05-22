@@ -1,0 +1,17 @@
+notify 10 {
+	match "system"		"GEOM";
+	match "subsystem"	"NBD";
+	match "type"		"DISCONNECTED";
+	action "gnbd reconnect -a $geom";
+};
+
+# Custom action for encrypted connections
+#notify 100 {
+#	match "system"		"GEOM";
+#	match "subsystem"	"NBD";
+#	match "type"		"DISCONNECTED";
+#	# match a specific geom name
+#	match "geom"		"nbd1";
+#	# provide the certificates and key
+#	action "gnbd reconnect -a -A <...> -C <...> -K <...> $geom";
+#};

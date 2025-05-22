@@ -160,11 +160,11 @@ nbd0
 # reboot -r
 ```
 
-Automatically reconnect failed connections (e.g. due to server reboot) every 10
-seconds to keep 2 connections alive:
+Automatically reconnect failed connections (edit for TLS):
 
 ```
-# daemon -R 10 gnbd scale -c 2 nbd0
+# cp devd.conf.sample /etc/devd/nbd.conf
+# service devd restart
 ```
 
 Test commands without installing outside of the source directory:

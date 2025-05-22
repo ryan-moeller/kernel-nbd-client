@@ -155,6 +155,7 @@ struct g_nbd_softc {
 	struct mtx	sc_queue_mtx;
 	SLIST_HEAD(, nbd_conn)	sc_connections;
 	u_int		sc_nconns;
+	u_int		sc_nactive;
 	struct mtx	sc_conns_mtx;
 	bool		sc_flushing;
 	struct sx	sc_flush_lock;
@@ -1036,10 +1037,10 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_REMOVE(&sc->sc_connections, nc, nbd_conn, nc_connections);
-	last = --sc->sc_nconns == 0;
+	last = --sc->sc_nactive == 0;
 	mtx_unlock(&sc->sc_conns_mtx);
 	if (last)
-		wakeup(&sc->sc_nconns);
+		wakeup(&sc->sc_nactive);
 
 	sx_xlock(&g_nbd_lock);
 	if (--g_nbd_nconns == 0)
@@ -1250,7 +1251,7 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 
 	mtx_lock(&sc->sc_conns_mtx);
 	SLIST_INSERT_HEAD(&sc->sc_connections, nc, nc_connections);
-	sc->sc_nconns++;
+	sc->sc_nactive++;
 	mtx_unlock(&sc->sc_conns_mtx);
 
 	SOCK_SENDBUF_LOCK(so);
@@ -1569,6 +1570,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_unit = unit;
 	sc->sc_tls = tls;
 	sc->sc_geom = gp;
+	sc->sc_nconns = nsockets;
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
 	SLIST_INIT(&sc->sc_connections);
@@ -1650,13 +1652,14 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	mtx_lock(&sc->sc_conns_mtx);
-	if (sc->sc_nconns == nconns) {
+	sc->sc_nconns = nconns;
+	if (sc->sc_nactive == nconns) {
 		mtx_unlock(&sc->sc_conns_mtx);
 		return;
 	}
-	if (sc->sc_nconns > nconns) {
+	if (sc->sc_nactive > nconns) {
 		struct nbd_conn *nc;
-		int n = sc->sc_nconns;
+		int n = sc->sc_nactive;
 
 		SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 			nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
@@ -1708,7 +1711,7 @@ bio_queue_empty(struct bio_queue *queue)
 static inline void
 g_nbd_free(struct g_nbd_softc *sc)
 {
-	KASSERT(sc->sc_nconns == 0, ("tried to free with connections"));
+	KASSERT(sc->sc_nactive == 0, ("tried to free with connections"));
 	KASSERT(bio_queue_empty(&sc->sc_queue),
 	    ("tried to free with bios in queue"));
 	g_topology_assert();
@@ -1743,11 +1746,12 @@ g_nbd_destroy(struct g_nbd_softc *sc)
 	g_topology_unlock();
 	g_wither_provider(sc->sc_provider, ENXIO);
 	mtx_lock(&sc->sc_conns_mtx);
+	sc->sc_nconns = 0;
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections)
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 	wakeup(&sc->sc_queue);
-	while (sc->sc_nconns > 0)
-		mtx_sleep(&sc->sc_nconns, &sc->sc_conns_mtx, PRIBIO,
+	while (sc->sc_nactive > 0)
+		mtx_sleep(&sc->sc_nactive, &sc->sc_conns_mtx, PRIBIO,
 		    "gnbd:destroy", 0);
 	mtx_unlock(&sc->sc_conns_mtx);
 	g_nbd_drain_queue(sc);
@@ -2092,8 +2096,9 @@ g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 	sc = gp->softc;
 	if (sc == NULL)
 		return;
-	sbuf_printf(sb, "%s<State>%s</State>\n", indent, sc->sc_nconns > 0 ?
-	    "CONNECTED" : "DISCONNECTED");
+	sbuf_printf(sb, "%s<State>%s</State>\n", indent,
+	    sc->sc_nactive == sc->sc_nconns ? "CONNECTED" :
+	    sc->sc_nactive > 0 ? "DEGRADED" : "DISCONNECTED");
 	sbuf_printf(sb, "%s<Host>%s</Host>\n", indent, sc->sc_host);
 	sbuf_printf(sb, "%s<Port>%s</Port>\n", indent, sc->sc_port);
 	sbuf_printf(sb, "%s<Name>%s</Name>\n", indent, sc->sc_name);
@@ -2175,6 +2180,8 @@ g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 	sbuf_printf(sb, "%s<TLS>%s</TLS>\n", indent, sc->sc_tls ? "yes" : "no");
 	sbuf_printf(sb, "%s<Connections>%u</Connections>\n", indent,
 	    sc->sc_nconns);
+	sbuf_printf(sb, "%s<ActiveConnections>%u</ActiveConnections>\n", indent,
+	    sc->sc_nactive);
 }
 
 static struct g_class g_nbd_class = {

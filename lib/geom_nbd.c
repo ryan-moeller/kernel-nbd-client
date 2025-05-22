@@ -47,6 +47,7 @@ uint32_t lib_version = G_LIB_VERSION;
 uint32_t version = G_NBD_VERSION;
 
 static void nbd_connect(struct gctl_req *req, unsigned flags);
+static void nbd_reconnect(struct gctl_req *req, unsigned flags);
 static void nbd_scale(struct gctl_req *req, unsigned flags);
 
 /* TODO: connect to multiple given names, list, connect to all */
@@ -74,6 +75,21 @@ struct g_command class_commands[] = {
 	    TLS_USAGE
 #endif
 	    "host"
+	},
+	{ "reconnect", 0, nbd_reconnect,
+	    {
+		{ 'a', "retry", NULL, G_TYPE_BOOL },
+		{ 'w', "seconds", "0", G_TYPE_NUMBER },
+#ifdef WITH_OPENSSL
+		TLS_OPTS,
+#endif
+		G_OPT_SENTINEL
+	    },
+	    "[-a] [-w seconds] "
+#ifdef WITH_OPENSSL
+	    TLS_USAGE
+#endif
+	    "prov"
 	},
 	{ "scale", 0, nbd_scale,
 	    {
@@ -114,6 +130,7 @@ struct nbd_client {
 	uint32_t preferred_blocksize;
 	uint32_t maximum_payload;
 	int socket;
+	long tid;
 #ifdef WITH_OPENSSL
 	SSL_CTX *ssl_ctx;
 #endif
@@ -730,6 +747,47 @@ nbd_client_negotiate(struct nbd_client *client, bool first)
 	return (-1);
 }
 
+static int *
+make_connections(struct nbd_client *client, struct gctl_req *req, int nsockets,
+    int delay)
+{
+	struct rlimit nofile;
+	int *sockets;
+
+	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
+		gctl_error(req, "Failed to get resource limits.");
+		return (NULL);
+	}
+	if (nsockets > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
+		gctl_error(req, "Number of connections exceeds limits.");
+		return (NULL);
+	}
+	thr_self(&client->tid);
+	gctl_ro_param(req, "thread", sizeof(client->tid), &client->tid);
+	sockets = malloc(sizeof(*sockets) * nsockets);
+	assert(sockets != NULL); /* can't do much if ENOMEM */
+	for (int i = 0; i < nsockets; i++) {
+		while (nbd_client_connect(client) != 0) {
+			if (delay <= 0) {
+				while (i > 0)
+					close(sockets[--i]);
+				free(sockets);
+				return (NULL);
+			}
+			sleep(delay);
+		}
+		sockets[i] = client->socket;
+		if (nbd_client_negotiate(client, i == 0) != 0) {
+			while (i >= 0)
+				close(sockets[i--]);
+			free(sockets);
+			return (NULL);
+		}
+	}
+	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
+	return (sockets);
+}
+
 /*
  * TODO: verbose output, connect all listed by server
  */
@@ -738,11 +796,10 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 {
 	char provider[PATH_MAX];
 	struct nbd_client client = {};
-	struct rlimit nofile;
+	const char *name;
 	int *sockets = NULL;
 	intmax_t nconns;
-	int nargs, nsockets;
-	long tid;
+	int nargs;
 	bool tls = false;
 
 	nargs = gctl_get_int(req, "nargs");
@@ -755,17 +812,6 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Invalid number of connections.");
 		return;
 	}
-	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
-		gctl_error(req, "Failed to get resource limits.");
-		return;
-	}
-	if (nconns > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
-		gctl_error(req, "Number of connections exceeds limits.");
-		return;
-	}
-	nsockets = nconns;
-	thr_self(&tid);
-	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
 	client.host = gctl_get_ascii(req, "arg0");
 	client.port = gctl_get_ascii(req, "port");
@@ -775,29 +821,16 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	tls = client.ssl_ctx != NULL;
 #endif
 	gctl_ro_param(req, "tls", sizeof(tls), &tls);
-	sockets = malloc(sizeof(*sockets) * nsockets);
-	assert(sockets != NULL); /* can't do much if ENOMEM */
-	for (int i = 0; i < nsockets; i++) {
-		if (nbd_client_connect(&client) != 0) {
-			while (i-- > 0)
-				close(sockets[i]);
-			goto free;
-		}
-		sockets[i] = client.socket;
-		if (client.name == NULL) {
-			/* May be overridden during negotiation. */
-			client.name = strdup(gctl_get_ascii(req, "name"));
-			assert(client.name != NULL); /* can't do much */
-		}
-		if (nbd_client_negotiate(&client, i == 0) != 0)
-			goto close;
-	}
+	client.name = strdup(gctl_get_ascii(req, "name"));
+	assert(client.name != NULL); /* can't do much if ENOMEM */
+	sockets = make_connections(&client, req, nconns, 0);
+	if (sockets == NULL)
+		goto free;
 	if ((client.transmission_flags & NBD_FLAG_CAN_MULTI_CONN) == 0 &&
-	    nsockets > 1) {
+	    nconns > 1) {
 		gctl_error(req, "Server does not allow multiple connections.");
 		goto close;
 	}
-	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
 	gctl_ro_param(req, "host", -1, client.host);
 	gctl_ro_param(req, "port", -1, client.port);
 	gctl_change_param(req, "name", -1, client.name);
@@ -816,7 +849,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	provider[sizeof(provider) - 1] = '\0';
 	puts(provider);
 close:
-	for (int i = 0; i < nsockets; i++)
+	for (int i = 0; i < nconns; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
 #ifdef WITH_OPENSSL
@@ -883,29 +916,22 @@ find_config(struct ggeom *gp, const char *name)
 }
 
 static void
-nbd_scale(struct gctl_req *req, unsigned flags)
+scale_common(struct gctl_req *req, bool reconnect)
 {
 	struct nbd_client client = {};
-	struct rlimit nofile;
 	struct gmesh mesh;
 	struct gclass *mp;
 	struct ggeom *gp;
 	const char *classname, *geomname, *name;
-	const char *tflags, *connections, *cfgtls;
+	const char *active, *connections, *tflags, *cfgtls;
 	int *sockets = NULL;
-	intmax_t nconns;
-	int nargs, nsockets;
-	long tid;
+	intmax_t nconns, delay;
+	int nargs, nactive, nsockets;
 	bool tls;
 
 	nargs = gctl_get_int(req, "nargs");
 	if (nargs != 1) {
 		gctl_error(req, "Invalid number of arguments.");
-		return;
-	}
-	nconns = gctl_get_intmax(req, "connections");
-	if (nconns < 1) {
-		gctl_error(req, "Invalid number of connections.");
 		return;
 	}
 	classname = gctl_get_ascii(req, "class");
@@ -924,46 +950,65 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 		gctl_error(req, "Cannot find GEOM '%s'.", geomname);
 		goto free;
 	}
-	tflags = find_config(gp, "TransmissionFlags");
-	if (tflags == NULL) {
-		gctl_error(req, "Invalid config (missing TransmissionFlags).");
-		goto free;
-	}
-	if (strstr(tflags, "CAN_MULTI_CONN") == NULL && nconns > 1) {
-		gctl_error(req, "Server does not allow multiple connections.");
-		goto free;
-	}
-	connections = find_config(gp, "Connections");
-	if (connections == NULL) {
-		gctl_error(req, "Invalid config (missing Connections).");
+	active = find_config(gp, "ActiveConnections");
+	if (active == NULL) {
+		gctl_error(req, "Invalid config (missing ActiveConnections).");
 		goto free;
 	}
 	errno = 0;
-	nsockets = strtol(connections, NULL, 10);
+	nactive = strtol(active, NULL, 10);
 	if (errno != 0) {
-		gctl_error(req, "Invalid config (invalid Connections).");
+		gctl_error(req, "Invalid config (invalid ActiveConnections).");
 		goto free;
 	}
-	if (nsockets == nconns)
-		/* Nothing to do. */
-		goto free;
-	if (nsockets > nconns) {
-		/* Scale down. */
-		gctl_issue(req);
-		goto free;
+	if (reconnect) {
+		delay = gctl_get_intmax(req, "seconds");
+		if (delay == 0 && gctl_get_int(req, "retry") != 0)
+			delay = 1;
+		connections = find_config(gp, "Connections");
+		if (connections == NULL) {
+			gctl_error(req,
+			    "Invalid config (missing Connections).");
+			goto free;
+		}
+		errno = 0;
+		nconns = strtol(connections, NULL, 10);
+		if (errno != 0) {
+			gctl_error(req,
+			    "Invalid config (invalid Connections).");
+			goto free;
+		}
+		if (nconns <= nactive)
+			/* Nothing to do. */
+			goto free;
+		gctl_ro_param(req, "connections", sizeof(nconns), &nconns);
+		gctl_change_param(req, "verb", -1, "scale");
+	} else {
+		delay = 0;
+		nconns = gctl_get_intmax(req, "connections");
+		if (nconns < 1) {
+			gctl_error(req, "Invalid number of connections.");
+			goto free;
+		}
+		if (nconns <= nactive) {
+			/* No new connections needed. */
+			gctl_issue(req);
+			goto free;
+		}
+		tflags = find_config(gp, "TransmissionFlags");
+		if (tflags == NULL) {
+			gctl_error(req,
+			    "Invalid config (missing TransmissionFlags).");
+			goto free;
+		}
+		if (strstr(tflags, "CAN_MULTI_CONN") == NULL && nconns > 1) {
+			gctl_error(req,
+			    "Server does not allow multiple connections.");
+			goto free;
+		}
 	}
-	nsockets = nconns - nsockets;
+	nsockets = nconns - nactive;
 	assert(nsockets > 0);
-	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
-		gctl_error(req, "Failed to get resource limits.");
-		goto free;
-	}
-	if (nsockets > nofile.rlim_cur - 4 /* stdin, stdout, stderr, gctl */) {
-		gctl_error(req, "Number of connections exceeds limits.");
-		goto free;
-	}
-	thr_self(&tid);
-	gctl_ro_param(req, "thread", sizeof(tid), &tid);
 	client.req = req;
 	client.host = find_config(gp, "Host");
 	if (client.host == NULL) {
@@ -1005,22 +1050,11 @@ nbd_scale(struct gctl_req *req, unsigned flags)
 	}
 	client.name = strdup(name);
 	assert(client.name != NULL); /* can't do much if ENOMEM */
-	sockets = malloc(sizeof(*sockets) * nsockets);
-	assert(sockets != NULL); /* can't do much if ENOMEM */
-	for (int i = 0; i < nsockets; i++) {
-		if (nbd_client_connect(&client) != 0) {
-			while (i-- > 0)
-				close(sockets[i]);
-			goto free;
-		}
-		sockets[i] = client.socket;
-		if (nbd_client_negotiate(&client, false) != 0)
-			goto close;
-	}
+	sockets = make_connections(&client, req, nsockets, delay);
+	if (sockets == NULL)
+		goto free;
 	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
-	gctl_ro_param(req, "sockets", sizeof(*sockets) * nsockets, sockets);
 	gctl_issue(req);
-close:
 	for (int i = 0; i < nsockets; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
@@ -1032,4 +1066,16 @@ free:
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));
 	geom_deletetree(&mesh);
+}
+
+static void
+nbd_reconnect(struct gctl_req *req, unsigned flags)
+{
+	scale_common(req, true);
+}
+
+static void
+nbd_scale(struct gctl_req *req, unsigned flags)
+{
+	scale_common(req, false);
 }

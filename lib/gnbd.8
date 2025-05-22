@@ -1,7 +1,7 @@
 .\" Copyright (c) 2025 Ryan Moeller
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd May 13, 2025
+.Dd May 22, 2025
 .Dt GNBD 8
 .Os
 .Sh NAME
@@ -33,6 +33,19 @@ utility:
 .Fl C Ar cert
 .Fl K Ar key
 .Ar host
+.Nm
+.Cm reconnect
+.Op Fl a
+.Op Fl w Ar seconds
+.Ar host
+.Nm
+.Cm reconnect
+.Op Fl a
+.Op Fl w Ar seconds
+.Op Fl A Ar cacert
+.Fl C Ar cert
+.Fl K Ar key
+.Ar prov
 .Nm
 .Cm scale
 .Fl c Ar num
@@ -92,42 +105,61 @@ indicates an action to be performed:
 .Bl -tag -width ".Cm disconnect"
 .It Cm connect
 Connect to an NBD server.
-The number of connections can be specified by
-.Fl c ,
-by default one connection is made.
-If the name of an export is not given by
-.Fl n ,
-the default export is requested.
-To make TLS connections, both a certificate and key must be given with
-.Fl C
-and
-.Fl K ,
-and a CA certificate for verifying certificates may optionally be
-provided using
-.Fl A ,
-otherwise the default system root CAs are used.
+.Bl -tag -width Fl
+.It Fl c Ar connections
+Use this many parallel connections.
+One connection is used if not specified.
+.It Fl n Ar name
+Connect to the named export.
+The default export is requested if not specified.
+.It Fl A Ar cacert
+Verify TLS certificates against the PEM-formatted CA certificate at the given
+path.
+The system root CAs are used if not specified.
+.It Fl C Ar cert
+Make a TLS connection using the PEM-formatted client certificate at the given
+path.
+.It Fl K Ar key
+Make a TLS connection using the PEM-formatted client key at the given path.
+.El
+.Pp
+To make TLS connections, both a certificate and key must be given.
 .Pp
 The path of a UNIX-domain socket may be specified in place of a host.
 UNIX-domain sockets are not expected to perform well or be useful with TLS.
-.It Cm scale
-Scale the number of connections for an existing device up or down to the number
-specified by
-.Fl c .
-To scale up the connections for a device using TLS, the certificate and key must
-be given with
-.Fl C
-and
-.Fl K ,
-and a CA certificate for verifying certificates may optionally be
-provided using
-.Fl A ,
-otherwise the default system root CAs are used.
-.Pp
-The
-.Cm scale
-command can also be used to recover from failed connections.
+.It Cm reconnect
+Re-establish failed connections.
+.Bl -tag -width Fl
+.It Fl a
+Retry every 1 second until connections are established.
+This is useful for a devd action in response to the GEOM NBD DISCONNECTED event.
+.It Fl w Ar seconds
+Wait this many seconds between successive retries.
+.El
 When all connections for a device have failed, the provider will persist and can
 resume normal operation when new connections are established.
+The number of connections set by
+.Cm connect
+or
+.Cm scale
+is restored.
+.It Cm scale
+Scale the number of connections for an existing device up or down.
+.Bl -tag -width Fl
+.It Fl c Ar connections
+Use this many parallel connections.
+.It Fl A Ar cacert
+Verify TLS certificates against the PEM-formatted CA certificate at the given
+path.
+The system root CAs are used if not specified.
+.It Fl C Ar cert
+Make a TLS connection using the PEM-formatted client certificate at the given
+path.
+.It Fl K Ar key
+Make a TLS connection using the PEM-formatted client key at the given path.
+.El
+.Pp
+To make TLS connections, both a certificate and key must be given.
 .It Cm disconnect
 Disconnect and remove the given provider.
 .It Cm help
