@@ -53,9 +53,23 @@ FEATURE(geom_nbd, "GEOM NBD module");
 SYSCTL_DECL(_kern_geom);
 static SYSCTL_NODE(_kern_geom, OID_AUTO, nbd, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM NBD configuration");
-static int g_nbd_debug = 0;
+
+static enum {
+	G_NBD_ERROR,
+	G_NBD_WARN,
+	G_NBD_INFO,
+	G_NBD_DEBUG,
+} g_nbd_debug;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
     "Debug level");
+
+#define G_NBD_LOG(lvl, ...) \
+    _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
+#define G_NBD_LOGREQ(lvl, bp, ...) \
+    _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), (bp), __VA_ARGS__)
+
+#define KTR_NBD KTR_SPARE4
+
 static uint32_t maxpayload = 1 << 25;
 SYSCTL_U32(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
     "Default maximum payload size");
@@ -65,7 +79,12 @@ SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
 static u_long recvspace = 1536 * 1024;
 SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, recvspace, CTLFLAG_RWTUN, &recvspace, 0,
     "Default socket receive buffer size");
-static int identfmt = 0;
+
+static enum {
+	G_NBD_IDENT_FULL,
+	G_NBD_IDENT_FALLBACK,
+	G_NBD_IDENT_NAME,
+} identfmt;
 SYSCTL_INT(_kern_geom_nbd, OID_AUTO, identfmt, CTLFLAG_RWTUN, &identfmt, 0,
     "Format of GEOM::ident (0=host:port/name, 1=name||host:port/name, 2=name)");
 
@@ -87,20 +106,6 @@ static COUNTER_U64_DEFINE_EARLY(g_nbd_read_truncs);
 SYSCTL_COUNTER_U64(_kern_geom_nbd_stats, OID_AUTO, read_truncs, CTLFLAG_RD,
     &g_nbd_read_truncs,
     "Number of times read limit was truncated to a page boundary");
-
-enum {
-	G_NBD_ERROR,
-	G_NBD_WARN,
-	G_NBD_INFO,
-	G_NBD_DEBUG,
-};
-
-#define G_NBD_LOG(lvl, ...) \
-    _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), NULL, __VA_ARGS__)
-#define G_NBD_LOGREQ(lvl, bp, ...) \
-    _GEOM_DEBUG("GEOM_NBD", g_nbd_debug, (lvl), (bp), __VA_ARGS__)
-
-#define KTR_NBD KTR_SPARE4
 
 struct g_nbd_softc;
 
@@ -1958,16 +1963,16 @@ g_nbd_handleattr_ident(struct g_nbd_softc *sc, struct bio *bp)
 	memset(bp->bio_data, 0, bp->bio_length);
 	switch (identfmt) {
 	default:
-	case 0:
+	case G_NBD_IDENT_FULL:
 		error = g_nbd_format_ident_full(sc, bp);
 		break;
-	case 1:
+	case G_NBD_IDENT_FALLBACK:
 		if (strcmp(sc->sc_name, "") == 0)
 			error = g_nbd_format_ident_full(sc, bp);
 		else
 			error = g_nbd_format_ident_name(sc, bp);
 		break;
-	case 2:
+	case G_NBD_IDENT_NAME:
 		error = g_nbd_format_ident_name(sc, bp);
 		break;
 	}
