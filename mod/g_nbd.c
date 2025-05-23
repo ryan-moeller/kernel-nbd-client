@@ -1588,7 +1588,9 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	for (int i = 0; i < nsockets; i++) {
 		error = g_nbd_add_conn(sc, sockets[i], gp->name, i == 0);
 		if (error != 0) {
-			/* TODO: handle this rare error */
+			soclose(sockets[i]);
+			gctl_error(req, "Error adding connection (%d)", error);
+			/* Keep going, we're in a recoverable state. */
 		}
 	}
 	g_free(sockets);
@@ -1684,7 +1686,9 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 	for (int i = 0; i < nsockets; i++) {
 		error = g_nbd_add_conn(sc, sockets[i], gp->name, false);
 		if (error != 0) {
-			/* TODO: handle this rare error */
+			soclose(sockets[i]);
+			gctl_error(req, "Error adding connection (%d)", error);
+			/* Keep going, we're in a recoverable state. */
 		}
 	}
 	g_free(sockets);
