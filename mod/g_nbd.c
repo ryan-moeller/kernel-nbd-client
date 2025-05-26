@@ -1031,6 +1031,18 @@ bio_queue_takefirst(struct bio_queue *queue)
 }
 
 static inline void
+g_nbd_notify_disconnected(struct g_nbd_softc *sc)
+{
+	struct sbuf *sb;
+
+	sb = sbuf_new_auto();
+	sbuf_printf(sb, "geom=%s", sc->sc_geom->name);
+	if (sbuf_finish(sb) == 0)
+		devctl_notify("GEOM", "NBD", "DISCONNECTED", sbuf_data(sb));
+	sbuf_delete(sb);
+}
+
+static inline void
 g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 {
 	bool last;
@@ -1152,16 +1164,8 @@ nbd_conn_sender(void *arg)
 	nbd_conn_drain_inflight(nc);
 	nbd_conn_close(nc);
 	/* Only notify of unintentional disconnects. */
-	if (notify) {
-		struct sbuf *sb;
-
-		sb = sbuf_new_auto();
-		sbuf_printf(sb, "geom=%s", sc->sc_geom->name);
-		if (sbuf_finish(sb) == 0)
-			devctl_notify("GEOM", "NBD", "DISCONNECTED",
-			    sbuf_data(sb));
-		sbuf_delete(sb);
-	}
+	if (notify)
+		g_nbd_notify_disconnected(sc);
 	g_nbd_remove_conn(sc, nc);
 	kthread_exit();
 }
