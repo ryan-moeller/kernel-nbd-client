@@ -1156,7 +1156,7 @@ nbd_conn_sender(void *arg)
 		nbd_conn_soft_disconnect(nc);
 		notify = false;
 	} else {
-		socantrcvmore(so);
+		soshutdown(so, SHUT_RDWR);
 		notify = true;
 	}
 	cv_signal(&nc->nc_receive_cv);
