@@ -706,8 +706,6 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				    __func__);
 				nbd_conn_degrade_state(nc,
 				    NBD_CONN_HARD_DISCONNECTING);
-				if (error == ENOMEM)
-					counter_u64_add(g_nbd_enomems, 1);
 				m_freem(m);
 				return (ENXIO);
 			}
