@@ -93,14 +93,13 @@ struct g_command class_commands[] = {
 	},
 	{ "reconnect", 0, nbd_reconnect,
 	    {
-		{ 'a', "retry", NULL, G_TYPE_BOOL },
-		{ 'w', "seconds", "0", G_TYPE_NUMBER },
+		{ 'r', "seconds", "0", G_TYPE_NUMBER },
 #ifdef WITH_OPENSSL
 		TLS_OPTS,
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "[-a] [-w seconds] "
+	    "[-r seconds] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
@@ -1165,8 +1164,6 @@ scale_common(struct gctl_req *req, bool reconnect)
 	}
 	if (reconnect) {
 		delay = gctl_get_intmax(req, "seconds");
-		if (delay == 0 && gctl_get_int(req, "retry") != 0)
-			delay = 1;
 		connections = find_config(gp, "Connections");
 		if (connections == NULL) {
 			gctl_error(req,

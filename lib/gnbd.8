@@ -35,13 +35,11 @@ utility:
 .Ar host
 .Nm
 .Cm reconnect
-.Op Fl a
-.Op Fl w Ar seconds
+.Op Fl r Ar seconds
 .Ar host
 .Nm
 .Cm reconnect
-.Op Fl a
-.Op Fl w Ar seconds
+.Op Fl r Ar seconds
 .Op Fl A Ar cacert
 .Fl C Ar cert
 .Fl K Ar key
@@ -141,11 +139,10 @@ UNIX-domain sockets are not expected to perform well or be useful with TLS.
 .It Cm reconnect
 Re-establish failed connections.
 .Bl -tag -width Fl
-.It Fl a
-Retry every 1 second until connections are established.
+.It Fl r Ar seconds
+Retry until connections are re-established, waiting this many seconds between
+successive retries.
 This is useful for a devd action in response to the GEOM NBD DISCONNECTED event.
-.It Fl w Ar seconds
-Wait this many seconds between successive retries.
 .El
 When all connections for a device have failed, the provider will persist and can
 resume normal operation when new connections are established.
