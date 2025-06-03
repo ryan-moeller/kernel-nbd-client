@@ -47,10 +47,11 @@ uint32_t lib_version = G_LIB_VERSION;
 uint32_t version = G_NBD_VERSION;
 
 static void nbd_connect(struct gctl_req *req, unsigned flags);
+static void nbd_list(struct gctl_req *req, unsigned flags);
 static void nbd_reconnect(struct gctl_req *req, unsigned flags);
 static void nbd_scale(struct gctl_req *req, unsigned flags);
 
-/* TODO: connect to multiple given names, list, connect to all */
+/* TODO: connect to multiple given names, connect to all */
 #ifdef WITH_OPENSSL
 #define TLS_OPTS \
 		{ 'A', "cacert", G_VAL_OPTIONAL, G_TYPE_STRING }, \
@@ -71,6 +72,20 @@ struct g_command class_commands[] = {
 		G_OPT_SENTINEL
 	    },
 	    "[-c num] [-n name] [-p port] "
+#ifdef WITH_OPENSSL
+	    TLS_USAGE
+#endif
+	    "host"
+	},
+	{ "exports", 0, nbd_list,
+	    {
+		{ 'p', "port", NBD_DEFAULT_PORT, G_TYPE_STRING },
+#ifdef WITH_OPENSSL
+		TLS_OPTS,
+#endif
+		G_OPT_SENTINEL
+	    },
+	    "[-p port] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
@@ -135,6 +150,9 @@ struct nbd_client {
 	SSL_CTX *ssl_ctx;
 #endif
 };
+
+/* Callback is responsible for freeing name/description. */
+typedef int (*nbd_client_list_cb)(void *ctx, char *name, char *description);
 
 #ifdef WITH_OPENSSL
 /* See http://archives.seul.org/libevent/users/Jan-2013/msg00039.html */
@@ -709,18 +727,9 @@ nbd_client_negotiate(struct nbd_client *client, bool first)
 	struct nbd_handshake handshake;
 	struct gctl_req *req = client->req;
 	ssize_t len;
-	int s = client->socket;
 
-	while ((len = recv(s, &handshake, sizeof(handshake),
-	    MSG_WAITALL)) != sizeof(handshake)) {
-		if (len == -1) {
-			if (errno == EINTR)
-				continue;
-			gctl_error(req, "Connection failed: %s",
-			    strerror(errno));
-			return (-1);
-		}
-	}
+	if (nbd_client_recv(client, &handshake, sizeof(handshake)) != 0)
+		return (-1);
 	nbd_handshake_ntoh(&handshake);
 	if (handshake.magic != NBD_MAGIC) {
 		gctl_error(req, "Handshake failed: invalid magic");
@@ -858,6 +867,199 @@ free:
 	free(sockets);
 	free(__DECONST(char *, client.name));
 	free(__DECONST(char *, client.description));
+}
+
+static inline void
+nbd_option_reply_server_ntoh(struct nbd_option_reply_server *server_export)
+{
+	server_export->length = be32toh(server_export->length);
+}
+
+static int
+nbd_client_list(struct nbd_client *client, nbd_client_list_cb cb, void *ctx)
+{
+	struct nbd_handshake handshake;
+	struct nbd_option_reply reply;
+	struct nbd_option_reply_server server_export;
+	struct gctl_req *req = client->req;
+	char *name, *description;
+	size_t resid;
+	ssize_t len;
+	int s = client->socket;
+
+	if (nbd_client_recv(client, &handshake, sizeof(handshake)) != 0)
+		return (-1);
+	nbd_handshake_ntoh(&handshake);
+	if (handshake.magic != NBD_MAGIC) {
+		gctl_error(req, "Handshake failed: invalid magic");
+		return (-1);
+	}
+	if (handshake.style == NBD_OLDSTYLE_MAGIC) {
+		puts("[default export]");
+		return (0);
+	}
+	if (handshake.style != NBD_NEWSTYLE_MAGIC) {
+		gctl_error(req, "Handshake failed: unknown style");
+		return (-1);
+	}
+	if (nbd_client_newstyle_negotiation(client) != 0)
+		return (-1);
+#ifdef WITH_OPENSSL
+	if (client->ssl_ctx != NULL && nbd_client_starttls(client) != 0)
+		return (-1);
+#endif
+	if (nbd_client_send_option(client, NBD_OPTION_LIST, NULL, 0) != 0)
+		return (-1);
+	for (;;) {
+		if (nbd_client_recv_option_reply(client, &reply,
+		    NBD_OPTION_LIST) != 0)
+			return (-1);
+		if (reply.type == NBD_REPLY_ACK)
+			break;
+		if ((reply.type & NBD_REPLY_ERROR) != 0) {
+			if (reply.length == 0)
+				gctl_error(req, "Listing exports failed (%d)",
+				    reply.type);
+			else {
+				uint8_t *buf;
+
+				buf = malloc(reply.length);
+				assert(buf != NULL);
+				if (nbd_client_recv(client, buf, reply.length)
+				    != 0)
+					return (-1);
+				gctl_error(req, "Listing exports failed: %.*s",
+				    reply.length, buf);
+				free(buf);
+			}
+			return (-1);
+		}
+		if (reply.type != NBD_REPLY_SERVER) {
+			gctl_error(req, "Unexpected option reply type.");
+			return (-1);
+		}
+		if (nbd_client_recv(client, &server_export,
+		    sizeof(server_export)) != 0)
+			return (-1);
+		nbd_option_reply_server_ntoh(&server_export);
+		assert((server_export.length + 4) <= reply.length);
+		if (server_export.length == 0)
+			name = NULL;
+		else {
+			resid = server_export.length;
+			name = malloc(resid + 1);
+			assert(name != NULL); /* hard to handle ENOMEM */
+			if (nbd_client_recv(client, name, resid) != 0) {
+				free(name);
+				return (-1);
+			}
+			name[resid] = '\0';
+		}
+		resid = reply.length - (4 + server_export.length);
+		if (resid == 0)
+			description = NULL;
+		else {
+			description = malloc(resid + 1);
+			assert(description != NULL); /* hard to handle ENOMEM */
+			if (nbd_client_recv(client, description, resid) != 0) {
+				free(description);
+				free(name);
+				return (-1);
+			}
+			description[resid] = '\0';
+		}
+		if (cb(ctx, name, description) != 0)
+			return (-1);
+	}
+	return (0);
+}
+
+static int
+list_callback(void *ctx __unused, char *name, char *description)
+{
+	if (name == NULL)
+		printf("[default export]");
+	else {
+		printf("%s", name);
+		free(name);
+	}
+	if (description == NULL)
+		printf("\n");
+	else {
+		printf("\t%s\n", description);
+		free(description);
+	}
+	/* TODO: verbosity control, more export info */
+	return (0);
+}
+
+static int
+nbd_client_abort(struct nbd_client *client)
+{
+	struct nbd_option_reply reply;
+	struct nbd_option_reply_server server_export;
+	struct gctl_req *req = client->req;
+
+	if (nbd_client_send_option(client, NBD_OPTION_ABORT, NULL, 0) != 0)
+		return (-1);
+	if (nbd_client_recv_option_reply(client, &reply, NBD_OPTION_ABORT) != 0)
+		return (-1);
+	if (reply.type == NBD_REPLY_ACK)
+		return (0);
+	if ((reply.type & NBD_REPLY_ERROR) != 0) {
+		if (reply.length == 0)
+			gctl_error(req, "Listing exports failed (%d)",
+			    reply.type);
+		else {
+			uint8_t *buf;
+
+			buf = malloc(reply.length);
+			assert(buf != NULL);
+			if (nbd_client_recv(client, buf, reply.length)
+			    != 0)
+				return (-1);
+			gctl_error(req, "Listing exports failed: %.*s",
+			    reply.length, buf);
+			free(buf);
+		}
+		return (-1);
+	}
+	gctl_error(req, "Unexpected option reply type.");
+	return (-1);
+}
+
+static void
+nbd_client_shutdown(struct nbd_client *client)
+{
+	shutdown(client->socket, SHUT_RDWR);
+}
+
+static void
+nbd_list(struct gctl_req *req, unsigned flags)
+{
+	struct nbd_client client = {};
+	int nargs;
+
+	nargs = gctl_get_int(req, "nargs");
+	if (nargs != 1) {
+		gctl_error(req, "Invalid number of arguments.");
+		return;
+	}
+	client.req = req;
+	client.host = gctl_get_ascii(req, "arg0");
+	client.port = gctl_get_ascii(req, "port");
+#ifdef WITH_OPENSSL
+	if (nbd_client_tls_init(&client) != 0)
+		return;
+#endif
+	if (nbd_client_connect(&client) != 0)
+		return;
+	if (nbd_client_list(&client, list_callback, NULL) != 0)
+		return;
+	if (nbd_client_abort(&client) != 0)
+		return;
+	nbd_client_shutdown(&client);
+	close(client.socket);
 }
 
 static struct gclass *

@@ -1,7 +1,7 @@
 .\" Copyright (c) 2025 Ryan Moeller
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd May 22, 2025
+.Dd June 3, 2025
 .Dt GNBD 8
 .Os
 .Sh NAME
@@ -60,6 +60,17 @@ utility:
 .Nm
 .Cm disconnect
 .Ar prov
+.Nm
+.Cm exports
+.Op Fl p Ar port
+.Ar host
+.Nm
+.Cm exports
+.Op Fl p Ar port
+.Op Fl A Ar cacert
+.Fl C Ar cert
+.Fl K Ar key
+.Ar host
 .Nm
 .Cm help
 .Nm
@@ -162,6 +173,8 @@ Make a TLS connection using the PEM-formatted client key at the given path.
 To make TLS connections, both a certificate and key must be given.
 .It Cm disconnect
 Disconnect and remove the given provider.
+.It Cm exports
+List exports of an NBD server.
 .It Cm help
 See
 .Xr geom 8 .

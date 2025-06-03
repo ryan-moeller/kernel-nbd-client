@@ -113,6 +113,18 @@ Disconnect the device `nbd0`:
 # gnbd disconnect nbd0
 ```
 
+List exports of an NBD server:
+
+```
+# gnbd exports nbdserver
+myexport    optional description
+```
+
+```
+# gnbd exports -p 1234 nbdserver
+[default export]
+```
+
 Connect to a named export:
 
 ```
