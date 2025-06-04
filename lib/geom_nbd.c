@@ -471,6 +471,10 @@ nbd_option_reply_is_valid(struct nbd_option_reply *reply, uint32_t opt)
 	return (true);
 }
 
+#ifndef NBD_OPTION_REPLY_LENGTH_LIMIT
+#define NBD_OPTION_REPLY_LENGTH_LIMIT (4 * PAGE_SIZE) /* arbitrary safeguard */
+#endif
+
 static int
 nbd_client_recv_option_reply(struct nbd_client *client,
     struct nbd_option_reply *reply, uint32_t opt)
@@ -481,6 +485,10 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	nbd_option_reply_ntoh(reply);
 	if (!nbd_option_reply_is_valid(reply, opt)) {
 		gctl_error(client->req, "Invalid option reply.");
+		return (-1);
+	}
+	if (reply->length > NBD_OPTION_REPLY_LENGTH_LIMIT) {
+		gctl_error(client->req, "Option reply too long, didn't read.");
 		return (-1);
 	}
 	return (0);
@@ -653,7 +661,6 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 			gctl_error(req, "Unexpected option reply type.");
 			return (-1);
 		}
-		/* TODO: sanitize lengths throughout */
 		assert(reply.length >= 2);
 		buf = malloc(reply.length);
 		assert(buf != NULL);
