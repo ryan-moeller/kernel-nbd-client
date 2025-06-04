@@ -51,7 +51,6 @@ static void nbd_list(struct gctl_req *req, unsigned flags);
 static void nbd_reconnect(struct gctl_req *req, unsigned flags);
 static void nbd_scale(struct gctl_req *req, unsigned flags);
 
-/* TODO: connect to multiple given names, connect to all */
 #ifdef WITH_OPENSSL
 #define TLS_OPTS \
 		{ 'A', "cacert", G_VAL_OPTIONAL, G_TYPE_STRING }, \
@@ -797,7 +796,7 @@ make_connections(struct nbd_client *client, struct gctl_req *req, int nsockets,
 }
 
 /*
- * TODO: verbose output, connect all listed by server
+ * TODO: verbose output
  */
 static void
 nbd_connect(struct gctl_req *req, unsigned flags)
