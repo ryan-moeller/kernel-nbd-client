@@ -5,24 +5,20 @@ freebsd_instance:
 task:
   matrix:
     # No motivation to backport module to 13.5-RELEASE
-    #- freebsd_instance:
+    #- name: releases/amd64/13.5-RELEASE
+    #  freebsd_instance:
     #    image_family: freebsd-13-5
-    #  env:
-    #    ARCHIVES_PATH: releases/amd64/13.5-RELEASE
-    - freebsd_instance:
+    - name: releases/amd64/14.2-RELEASE
+      freebsd_instance:
         image_family: freebsd-14-2
-      env:
-        ARCHIVES_PATH: releases/amd64/14.2-RELEASE
-    - freebsd_instance:
+    - name: snapshots/amd64/15.0-CURRENT
+      freebsd_instance:
         image_family: freebsd-15-0-snap
-      env:
-        ARCHIVES_PATH: snapshots/amd64/15.0-CURRENT
-  name: ${ARCHIVES_PATH}
   stateful: false
   env:
     WD: /tmp/wd
     PATH: /usr/local/sbin:${PATH}
-    ARCHIVES_BASE: https://download.freebsd.org/${ARCHIVES_PATH}
+    ARCHIVES_BASE: https://download.freebsd.org/${CIRRUS_TASK_NAME}
   build_setup_script:
     - mkdir ${WD}
     - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel.txz
