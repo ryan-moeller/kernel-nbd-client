@@ -101,10 +101,10 @@ enum {
 	NBD_OPTION_LIST             = 3,
 	NBD_OPTION_PEEK_EXPORT      = 4, // withdrawn
 	NBD_OPTION_STARTTLS         = 5,
-	NBD_OPTION_INFO             = 6, // experimental extension
-	NBD_OPTION_GO               = 7, // experimental extension
-	NBD_OPTION_STRUCTURED_REPLY = 8, // experimental extension
-	NBD_OPTION_BLOCK_SIZE       = 9, // experimental extension
+	NBD_OPTION_INFO             = 6,
+	NBD_OPTION_GO               = 7,
+	NBD_OPTION_STRUCTURED_REPLY = 8,
+	NBD_OPTION_BLOCK_SIZE       = 9,
 };
 
 struct nbd_option {
@@ -120,7 +120,7 @@ struct nbd_option {
 enum {
 	NBD_REPLY_ACK    = 1,
 	NBD_REPLY_SERVER = 2,
-	NBD_REPLY_INFO   = 3, // experimental extension
+	NBD_REPLY_INFO   = 3,
 
 	NBD_REPLY_ERROR                 = (1 << 31),
 	NBD_REPLY_ERROR_UNSUPPORTED     = (1 | NBD_REPLY_ERROR),
@@ -128,9 +128,9 @@ enum {
 	NBD_REPLY_ERROR_INVALID         = (3 | NBD_REPLY_ERROR),
 	NBD_REPLY_ERROR_PLATFORM        = (4 | NBD_REPLY_ERROR), // unused
 	NBD_REPLY_ERROR_TLS_REQUIRED    = (5 | NBD_REPLY_ERROR),
-	NBD_REPLY_ERROR_UNKNOWN         = (6 | NBD_REPLY_ERROR), // experimental extension
+	NBD_REPLY_ERROR_UNKNOWN         = (6 | NBD_REPLY_ERROR),
 	NBD_REPLY_ERROR_SHUTDOWN        = (7 | NBD_REPLY_ERROR),
-	NBD_REPLY_ERROR_BLOCK_SIZE_REQD = (8 | NBD_REPLY_ERROR), // experimental extension
+	NBD_REPLY_ERROR_BLOCK_SIZE_REQD = (8 | NBD_REPLY_ERROR),
 };
 
 struct nbd_option_reply {
@@ -252,7 +252,7 @@ enum {
 	NBD_ENOMEM    = 12,
 	NBD_EINVAL    = 22,
 	NBD_ENOSPC    = 28,
-	NBD_EOVERFLOW = 75, // (experimental extension)
+	NBD_EOVERFLOW = 75,
 	NBD_ESHUTDOWN = 108,
 };
 
