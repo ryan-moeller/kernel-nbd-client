@@ -271,6 +271,22 @@ struct nbd_simple_reply {
 
 #define NBD_STRUCTURED_REPLY_MAGIC 0x668e33ef
 
+#define NBD_REPLY_FLAG_DONE (1 << 0)
+
+enum {
+	NBD_REPLY_TYPE_NONE             = 0,
+	NBD_REPLY_TYPE_OFFSET_DATA      = 1,
+	NBD_REPLY_TYPE_OFFSET_HOLE      = 2,
+	// 3 unused
+	// 4 unused
+	NBD_REPLY_TYPE_BLOCK_STATUS     = 5,
+	NBD_REPLY_TYPE_BLOCK_STATUS_EXT = 6, // experimental EXTENDED_HEADERS
+
+	NBD_REPLY_TYPE_ERROR_BIT    = (1 << 15),
+	NBD_REPLY_TYPE_ERROR        = (1 | NBD_REPLY_TYPE_ERROR_BIT),
+	NBD_REPLY_TYPE_ERROR_OFFSET = (2 | NBD_REPLY_TYPE_ERROR_BIT),
+};
+
 struct nbd_structured_reply {
 	uint32_t magic;
 	uint16_t flags;
@@ -280,5 +296,34 @@ struct nbd_structured_reply {
 	// uint8_t data[]; (sent separately)
 } __packed;
 
+struct nbd_reply_offset_data {
+	uint64_t offset;
+	// uint8_t data[]; (sent separately)
+} __packed;
+
+struct nbd_reply_offset_hole {
+	uint64_t offset;
+	uint32_t size;
+} __packed;
+
+struct nbd_reply_block_status {
+	uint32_t context;
+	// struct nbd_reply_block_status_descriptor descs[]; (sent separately)
+} __packed;
+
+struct nbd_reply_block_status_descriptor {
+	uint32_t size;
+	uint32_t status;
+} __packed;
+
+struct nbd_reply_error {
+	uint32_t error;
+	uint16_t length;
+	// char message[]; (sent separately)
+} __packed;
+
+struct nbd_reply_error_offset {
+	uint64_t offset;
+} __packed;
 
 #endif /* #ifndef _NBD_PROTOCOL_H_ */
