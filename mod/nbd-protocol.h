@@ -148,7 +148,19 @@ struct nbd_option_reply_server {
 } __packed;
 
 
-/* See the next section for the definitions of the transmission flags. */
+#define NBD_FLAG_HAS_FLAGS            (1 << 0)
+#define NBD_FLAG_READ_ONLY            (1 << 1)
+#define NBD_FLAG_SEND_FLUSH           (1 << 2)
+#define NBD_FLAG_SEND_FUA             (1 << 3) /* FUA = force unit access */
+#define NBD_FLAG_ROTATIONAL           (1 << 4) /* use elevator algorithm */
+#define NBD_FLAG_SEND_TRIM            (1 << 5)
+#define NBD_FLAG_SEND_WRITE_ZEROES    (1 << 6)
+#define NBD_FLAG_SEND_DF              (1 << 7)
+#define NBD_FLAG_CAN_MULTI_CONN       (1 << 8)
+#define NBD_FLAG_SEND_RESIZE          (1 << 9)
+#define NBD_FLAG_SEND_CACHE           (1 << 10)
+#define NBD_FLAG_SEND_FAST_ZERO       (1 << 11)
+#define NBD_FLAG_BLOCK_STATUS_PAYLOAD (1 << 12)
 
 struct nbd_export_info {
 	uint64_t size;
@@ -211,26 +223,19 @@ struct nbd_info_block_size {
 
 #define NBD_REQUEST_MAGIC 0x25609513
 
-#define NBD_FLAG_HAS_FLAGS            (1 << 0)
-#define NBD_FLAG_READ_ONLY            (1 << 1)
-#define NBD_FLAG_SEND_FLUSH           (1 << 2)
-#define NBD_FLAG_SEND_FUA             (1 << 3) /* FUA = force unit access */
-#define NBD_FLAG_ROTATIONAL           (1 << 4) /* use elevator algorithm */
-#define NBD_FLAG_SEND_TRIM            (1 << 5)
-#define NBD_FLAG_SEND_WRITE_ZEROES    (1 << 6)
-#define NBD_FLAG_SEND_DF              (1 << 7)
-#define NBD_FLAG_CAN_MULTI_CONN       (1 << 8)
-#define NBD_FLAG_SEND_RESIZE          (1 << 9)
-#define NBD_FLAG_SEND_CACHE           (1 << 10)
-#define NBD_FLAG_SEND_FAST_ZERO       (1 << 11)
-#define NBD_FLAG_BLOCK_STATUS_PAYLOAD (1 << 12)
+#define NBD_CMD_FLAG_FUA         (1 << 0)
+#define NBD_CMD_FLAG_NO_HOLE     (1 << 1)
+#define NBD_CMD_FLAG_DF          (1 << 2)
+#define NBD_CMD_FLAG_REQ_ONE     (1 << 3)
+#define NBD_CMD_FLAG_FAST_ZERO   (1 << 4)
+#define NBD_CMD_FLAG_PAYLOAD_LEN (1 << 5) // experimental EXTENDED_HEADERS
 
 enum {
-	NBD_CMD_READ        = 0,
-	NBD_CMD_WRITE       = 1,
-	NBD_CMD_DISCONNECT  = 2,
-	NBD_CMD_FLUSH       = 3,
-	NBD_CMD_TRIM        = 4,
+	NBD_CMD_READ       = 0,
+	NBD_CMD_WRITE      = 1,
+	NBD_CMD_DISCONNECT = 2,
+	NBD_CMD_FLUSH      = 3,
+	NBD_CMD_TRIM       = 4,
 };
 
 struct nbd_request {
