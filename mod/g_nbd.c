@@ -228,6 +228,35 @@ nbd_inflight_release(struct bio *bp)
 }
 
 static inline void
+nbd_inflight_deliver(struct bio *bp, int error)
+{
+	CTR3(KTR_NBD, "%s cookie=%lu error=%d", __func__,
+	    nbd_inflight_get_cookie(bp), error);
+	atomic_cmpset_int(&bp->bio_error, 0, error);
+	if (nbd_inflight_release(bp))
+		g_io_deliver(bp, bp->bio_error);
+}
+
+static void
+nbd_inflight_free_mext(struct mbuf *m)
+{
+	struct bio *bp = m->m_ext.ext_arg1;
+
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
+	nbd_inflight_deliver(bp, 0);
+}
+
+static inline void
+nbd_inflight_cancel(struct bio *bp)
+{
+	bool last __diagused;
+
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
+	last = nbd_inflight_release(bp);
+	KASSERT(last, ("inflight bio %p still referenced", bp));
+}
+
+static inline void
 bio_queue_init(struct bio_queue *queue)
 {
 	TAILQ_INIT(queue);
@@ -301,25 +330,6 @@ nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct bio *bp)
 			wakeup_one(&bp->bio_driver1);
 		}
 	}
-}
-
-static inline void
-nbd_inflight_deliver(struct bio *bp, int error)
-{
-	CTR3(KTR_NBD, "%s cookie=%lu error=%d", __func__,
-	    nbd_inflight_get_cookie(bp), error);
-	atomic_cmpset_int(&bp->bio_error, 0, error);
-	if (nbd_inflight_release(bp))
-		g_io_deliver(bp, bp->bio_error);
-}
-
-static void
-nbd_inflight_free_mext(struct mbuf *m)
-{
-	struct bio *bp = m->m_ext.ext_arg1;
-
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
-	nbd_inflight_deliver(bp, 0);
 }
 
 #ifdef KTR
@@ -1057,16 +1067,6 @@ nbd_conn_close(struct nbd_conn *nc)
 	soupcall_clear(so, SO_RCV);
 	SOCK_RECVBUF_UNLOCK(so);
 	soclose(so);
-}
-
-static inline void
-nbd_inflight_cancel(struct bio *bp)
-{
-	bool last __diagused;
-
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
-	last = nbd_inflight_release(bp);
-	KASSERT(last, ("inflight bio %p still referenced", bp));
 }
 
 static inline void
