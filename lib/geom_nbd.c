@@ -1013,8 +1013,7 @@ nbd_client_abort(struct nbd_client *client)
 		return (0);
 	if ((reply.type & NBD_REPLY_ERROR) != 0) {
 		if (reply.length == 0)
-			gctl_error(req, "Listing exports failed (%d)",
-			    reply.type);
+			gctl_error(req, "Abort option failed (%d)", reply.type);
 		else {
 			uint8_t *buf;
 
@@ -1023,7 +1022,7 @@ nbd_client_abort(struct nbd_client *client)
 			if (nbd_client_recv(client, buf, reply.length)
 			    != 0)
 				return (-1);
-			gctl_error(req, "Listing exports failed: %.*s",
+			gctl_error(req, "Abort option failed: %.*s",
 			    reply.length, buf);
 			free(buf);
 		}
