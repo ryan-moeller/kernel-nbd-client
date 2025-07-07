@@ -228,9 +228,46 @@ nbd_inflight_release(struct bio *bp)
 }
 
 static inline void
+bio_queue_init(struct bio_queue *queue)
+{
+	TAILQ_INIT(queue);
+}
+
+static inline void
 bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
 {
 	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
+}
+
+static inline void
+bio_queue_remove(struct bio_queue *queue, struct bio *bp)
+{
+	TAILQ_REMOVE(queue, bp, bio_queue);
+}
+
+static inline struct bio *
+bio_queue_takefirst(struct bio_queue *queue)
+{
+	struct bio *bp;
+
+	bp = TAILQ_FIRST(queue);
+	if (bp != NULL)
+		bio_queue_remove(queue, bp);
+	return (bp);
+}
+
+static inline bool
+bio_queue_empty(struct bio_queue *queue)
+{
+	return (TAILQ_EMPTY(queue));
+}
+
+/* q1 <- q2 + q1 */
+static inline void
+bio_queue_concat_front(struct bio_queue *queue1, struct bio_queue *queue2)
+{
+	TAILQ_CONCAT(queue2, queue1, bio_queue);
+	TAILQ_SWAP(queue2, queue1, bio, bio_queue);
 }
 
 static inline void
@@ -243,12 +280,6 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 	mtx_lock(&nc->nc_inflight_mtx);
 	bio_queue_insert_tail(&nc->nc_inflight, bp);
 	mtx_unlock(&nc->nc_inflight_mtx);
-}
-
-static inline void
-bio_queue_remove(struct bio_queue *queue, struct bio *bp)
-{
-	TAILQ_REMOVE(queue, bp, bio_queue);
 }
 
 static void
@@ -1036,37 +1067,6 @@ nbd_inflight_cancel(struct bio *bp)
 	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
 	last = nbd_inflight_release(bp);
 	KASSERT(last, ("inflight bio %p still referenced", bp));
-}
-
-static inline void
-bio_queue_init(struct bio_queue *queue)
-{
-	TAILQ_INIT(queue);
-}
-
-static inline struct bio *
-bio_queue_takefirst(struct bio_queue *queue)
-{
-	struct bio *bp;
-
-	bp = TAILQ_FIRST(queue);
-	if (bp != NULL)
-		bio_queue_remove(queue, bp);
-	return (bp);
-}
-
-static inline bool
-bio_queue_empty(struct bio_queue *queue)
-{
-	return (TAILQ_EMPTY(queue));
-}
-
-/* q1 <- q2 + q1 */
-static inline void
-bio_queue_concat_front(struct bio_queue *queue1, struct bio_queue *queue2)
-{
-	TAILQ_CONCAT(queue2, queue1, bio_queue);
-	TAILQ_SWAP(queue2, queue1, bio, bio_queue);
 }
 
 static inline void
