@@ -41,7 +41,6 @@
 
 #include <machine/atomic.h>
 
-#include <vm/uma.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
