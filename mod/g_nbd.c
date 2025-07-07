@@ -686,11 +686,11 @@ nbd_conn_recv_ok(struct nbd_conn *nc)
 static struct bio *
 nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 {
-	struct bio *bp, *bp2;
+	struct bio *bp;
 
 	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, cookie);
 	mtx_lock(&nc->nc_inflight_mtx);
-	TAILQ_FOREACH_SAFE(bp, &nc->nc_inflight, bio_queue, bp2) {
+	TAILQ_FOREACH(bp, &nc->nc_inflight, bio_queue) {
 		if (nbd_inflight_get_cookie(bp) == cookie) {
 			bio_queue_remove(&nc->nc_inflight, bp);
 			break;
