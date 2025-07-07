@@ -1073,14 +1073,17 @@ static inline void
 nbd_conn_drain_inflight(struct nbd_conn *nc)
 {
 	struct g_nbd_softc *sc = nc->nc_softc;
-	struct bio_queue tmp;
 	struct bio *bp;
 	bool first;
 
 	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
-	bio_queue_init(&tmp);
+	/*
+	 * Other connection threads may access this inflight queue to wait for
+	 * flush, so we still need to lock even though we are the only thread
+	 * left for this connection.
+	 */
 	mtx_lock(&nc->nc_inflight_mtx);
-	while ((bp = bio_queue_takefirst(&nc->nc_inflight)) != NULL) {
+	TAILQ_FOREACH(bp, &nc->nc_inflight, bio_queue) {
 		nbd_inflight_cancel(bp);
 		/*
 		 * FIXME: This is incorrect, yet necessary for now.
@@ -1094,21 +1097,20 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 				wakeup_one(&bp->bio_driver1);
 			}
 		}
-		bio_queue_insert_tail(&tmp, bp);
 	}
-	mtx_unlock(&nc->nc_inflight_mtx);
-	if (!bio_queue_empty(&tmp)) {
+	if (!bio_queue_empty(&nc->nc_inflight)) {
 		/*
 		 * Put the bios back at the front of the queue so they can be
 		 * handled by another connection.
 		 */
 		mtx_lock(&sc->sc_queue_mtx);
 		first = bio_queue_empty(&sc->sc_queue);
-		bio_queue_concat_front(&sc->sc_queue, &tmp);
+		bio_queue_concat_front(&sc->sc_queue, &nc->nc_inflight);
 		mtx_unlock(&sc->sc_queue_mtx);
 		if (first)
 			wakeup(&sc->sc_queue);
 	}
+	mtx_unlock(&nc->nc_inflight_mtx);
 }
 
 static inline void
