@@ -116,19 +116,12 @@ enum nbd_conn_state {
 	NBD_CONN_CLOSED,
 };
 
-struct nbd_inflight {
-	struct bio	*ni_bio;
-	uint64_t	ni_cookie;
-	u_int		ni_refs;
-	TAILQ_ENTRY(nbd_inflight)	ni_inflight;
-};
-
 struct nbd_conn {
 	struct g_nbd_softc	*nc_softc;
 	struct socket		*nc_socket;
 	enum nbd_conn_state	nc_state;
 	uint64_t		nc_seq;
-	TAILQ_HEAD(, nbd_inflight)	nc_inflight;
+	struct bio_queue	nc_inflight;
 	struct mtx		nc_inflight_mtx;
 	struct cv		nc_send_cv;
 	struct cv		nc_receive_cv;
@@ -171,7 +164,6 @@ static struct proc *g_nbd_proc;
 static u_int g_nbd_nconns;
 static struct sx g_nbd_lock;
 static struct unrhdr *g_nbd_unit;
-static uma_zone_t g_nbd_inflight_zone;
 static u_int g_nbd_tlsmax;
 
 static inline int16_t
@@ -206,65 +198,98 @@ bio_cmd_str(struct bio *bp)
 	}
 }
 
-static inline struct nbd_inflight *
+static inline void
+nbd_inflight_set_cookie(struct bio *bp, uint64_t cookie)
+{
+	bp->bio_driver1 = (void *)(uintptr_t)cookie;
+}
+
+static inline uint64_t
+nbd_inflight_get_cookie(struct bio *bp)
+{
+	return ((uint64_t)(uintptr_t)bp->bio_driver1);
+}
+
+static inline void
+nbd_inflight_set_refs(struct bio *bp, u_int refs)
+{
+	bp->bio_driver2 = (void *)(uintptr_t)refs;
+}
+
+static inline u_int
+nbd_inflight_acquire(struct bio *bp)
+{
+	return (refcount_acquire((u_int *)&bp->bio_driver2));
+}
+
+static inline bool
+nbd_inflight_release(struct bio *bp)
+{
+	return (refcount_release((u_int *)&bp->bio_driver2));
+}
+
+static inline void
+bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
+{
+	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
+}
+
+static inline void
 nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 {
-	struct nbd_inflight *ni;
-
 	CTR4(KTR_NBD, "%s nc=%p bp=%p cookie=%lu", __func__, nc, bp,
 	    nc->nc_seq);
-	ni = uma_zalloc(g_nbd_inflight_zone, M_NOWAIT | M_ZERO);
-	if (__predict_false(ni == NULL))
-		return (NULL);
-	ni->ni_bio = bp;
-	ni->ni_cookie = nc->nc_seq++;
-	ni->ni_refs = 1;
+	nbd_inflight_set_cookie(bp, nc->nc_seq++);
+	nbd_inflight_set_refs(bp, 1);
 	mtx_lock(&nc->nc_inflight_mtx);
-	TAILQ_INSERT_TAIL(&nc->nc_inflight, ni, ni_inflight);
+	bio_queue_insert_tail(&nc->nc_inflight, bp);
 	mtx_unlock(&nc->nc_inflight_mtx);
-	return (ni);
+}
+
+static inline void
+bio_queue_remove(struct bio_queue *queue, struct bio *bp)
+{
+	TAILQ_REMOVE(queue, bp, bio_queue);
 }
 
 static void
-nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct nbd_inflight *ni)
+nbd_conn_remove_inflight_specific(struct nbd_conn *nc, struct bio *bp)
 {
-	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, ni->ni_cookie);
+	CTR3(KTR_NBD, "%s bp=%p cookie=%lu", __func__, bp,
+	    nbd_inflight_get_cookie(bp));
 	mtx_lock(&nc->nc_inflight_mtx);
-	TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
+	bio_queue_remove(&nc->nc_inflight, bp);
 	mtx_unlock(&nc->nc_inflight_mtx);
 	/*
 	 * FIXME: This is incorrect, yet necessary for now.
 	 * Need a way to signal failure to the flush.
 	 */
 	if (__predict_false(atomic_load_bool(&nc->nc_softc->sc_flushing))) {
-		switch (ni->ni_bio->bio_cmd) {
+		switch (bp->bio_cmd) {
 		case BIO_DELETE:
 		case BIO_WRITE:
-			wakeup_one(ni);
+			wakeup_one(&bp->bio_driver1);
 		}
 	}
 }
 
 static inline void
-nbd_inflight_deliver(struct nbd_inflight *ni, int error)
+nbd_inflight_deliver(struct bio *bp, int error)
 {
-	struct bio *bp = ni->ni_bio;
-
-	CTR3(KTR_NBD, "%s cookie=%lu error=%d", __func__, ni->ni_cookie, error);
+	CTR3(KTR_NBD, "%s cookie=%lu error=%d", __func__,
+	    nbd_inflight_get_cookie(bp), error);
 	atomic_cmpset_int(&bp->bio_error, 0, error);
-	if (refcount_release(&ni->ni_refs)) {
+	if (nbd_inflight_release(bp))
 		g_io_deliver(bp, bp->bio_error);
-		uma_zfree(g_nbd_inflight_zone, ni);
-	}
 }
 
 static void
 nbd_inflight_free_mext(struct mbuf *m)
 {
-	struct nbd_inflight *ni = m->m_ext.ext_arg1;
+	struct bio *bp = m->m_ext.ext_arg1;
 
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
-	nbd_inflight_deliver(ni, 0);
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
+	nbd_inflight_deliver(bp, 0);
 }
 
 #ifdef KTR
@@ -357,9 +382,8 @@ nbd_request_mbuf(bool tls, struct nbd_request **reqp)
 }
 
 static struct mbuf *
-nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
+nbd_write_mbufs(struct bio *bp, bool tls, size_t limit, size_t *offset)
 {
-	struct bio *bp = ni->ni_bio;
 	vm_ooffset_t start = *offset;
 	struct mbuf *m;
 
@@ -368,7 +392,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 	    __func__, start));
 
 	CTR5(KTR_NBD, "%s cookie=%lu %s limit=%zu *offset=%zu", __func__,
-	    ni->ni_cookie, tls ? "tls" : "notls", limit, start);
+	    nbd_inflight_get_cookie(bp), tls ? "tls" : "notls", limit, start);
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 		struct mbuf *d, *m_tail;
 		size_t page_offset = start == 0 ? bp->bio_ma_offset : 0;
@@ -376,7 +400,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		size_t len;
 
 		CTR3(KTR_NBD, "%s cookie=%lu unmapped write (%s)", __func__,
-		    ni->ni_cookie, tls ? "tls" : "notls");
+		    nbd_inflight_get_cookie(bp), tls ? "tls" : "notls");
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit - page_offset) + page_offset;
@@ -397,8 +421,8 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 					m_freem(m);
 					return (NULL);
 				}
-				refcount_acquire(&ni->ni_refs);
-				d->m_ext.ext_arg1 = ni;
+				nbd_inflight_acquire(bp);
+				d->m_ext.ext_arg1 = bp;
 				d->m_epg_1st_off = page_offset;
 				if (m == NULL)
 					m = d;
@@ -431,7 +455,7 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		size_t len;
 
 		CTR2(KTR_NBD, "%s cookie=%lu mapped write (tls)", __func__,
-		    ni->ni_cookie);
+		    nbd_inflight_get_cookie(bp));
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
 			resid = trunc_page(limit);
@@ -468,13 +492,13 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 		size_t len = MIN(bp->bio_length - start, limit);
 
 		CTR2(KTR_NBD, "%s cookie=%lu mapped write (notls)", __func__,
-		    ni->ni_cookie);
+		    nbd_inflight_get_cookie(bp));
 		m = m_get(M_NOWAIT, MT_DATA);
 		if (__predict_false(m == NULL))
 			return (NULL);
-		refcount_acquire(&ni->ni_refs);
+		nbd_inflight_acquire(bp);
 		m_extadd(m, bp->bio_data + start, len, nbd_inflight_free_mext,
-		    ni, NULL, M_RDONLY, EXT_MOD_TYPE);
+		    bp, NULL, M_RDONLY, EXT_MOD_TYPE);
 		m->m_len = len;
 		*offset += len;
 	}
@@ -482,10 +506,9 @@ nbd_write_mbufs(struct nbd_inflight *ni, bool tls, size_t limit, size_t *offset)
 }
 
 static void
-nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
+nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 {
 	struct socket *so = nc->nc_socket;
-	struct bio *bp = ni->ni_bio;
 	struct nbd_request *req;
 	struct mbuf *m;
 	size_t offset, resid;
@@ -498,18 +521,18 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 	KASSERT(cmd != -1, ("unsupported bio command queued: %s (%d)",
 	    bio_cmd_str(bp), bp->bio_cmd));
 
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
 	m = nbd_request_mbuf(tls, &req);
 	if (__predict_false(m == NULL)) {
 		counter_u64_add(g_nbd_enomems, 1);
-		nbd_conn_remove_inflight_specific(nc, ni);
-		nbd_inflight_deliver(ni, ENOMEM);
+		nbd_conn_remove_inflight_specific(nc, bp);
+		nbd_inflight_deliver(bp, ENOMEM);
 		return;
 	}
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
 	req->flags = htobe16(flags);
 	req->command = htobe16(cmd);
-	req->cookie = htobe64(ni->ni_cookie);
+	req->cookie = htobe64(nbd_inflight_get_cookie(bp));
 	req->offset = htobe64(bp->bio_offset);
 	req->length = htobe32(bp->bio_length);
 	needed = resid = sizeof(*req);
@@ -522,12 +545,12 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			size_t prev_offset = offset;
 			struct mbuf *d;
 
-			d = nbd_write_mbufs(ni, tls, limit, &offset);
+			d = nbd_write_mbufs(bp, tls, limit, &offset);
 			if (__predict_false(d == NULL)) {
 				m_free(m);
 				counter_u64_add(g_nbd_enomems, 1);
-				nbd_conn_remove_inflight_specific(nc, ni);
-				nbd_inflight_deliver(ni, ENOMEM);
+				nbd_conn_remove_inflight_specific(nc, bp);
+				nbd_inflight_deliver(bp, ENOMEM);
 				return;
 			}
 			if (m == NULL)
@@ -558,8 +581,8 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 				    NBD_CONN_CONNECTED,
 				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
-				nbd_conn_remove_inflight_specific(nc, ni);
-				nbd_inflight_deliver(ni, ENXIO);
+				nbd_conn_remove_inflight_specific(nc, bp);
+				nbd_inflight_deliver(bp, ENXIO);
 				return;
 			}
 			if (sbspace(&so->so_snd) >= needed)
@@ -584,8 +607,8 @@ nbd_conn_send(struct nbd_conn *nc, struct nbd_inflight *ni)
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 			if (error == ENOMEM)
 				counter_u64_add(g_nbd_enomems, 1);
-			nbd_conn_remove_inflight_specific(nc, ni);
-			nbd_inflight_deliver(ni, error);
+			nbd_conn_remove_inflight_specific(nc, bp);
+			nbd_inflight_deliver(bp, error);
 			return;
 		}
 		resid -= needed;
@@ -661,29 +684,29 @@ nbd_conn_recv_ok(struct nbd_conn *nc)
 	return (true);
 }
 
-static struct nbd_inflight *
+static struct bio *
 nbd_conn_remove_inflight(struct nbd_conn *nc, uint64_t cookie)
 {
-	struct nbd_inflight *ni, *ni2;
+	struct bio *bp, *bp2;
 
 	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, cookie);
 	mtx_lock(&nc->nc_inflight_mtx);
-	TAILQ_FOREACH_SAFE(ni, &nc->nc_inflight, ni_inflight, ni2) {
-		if (ni->ni_cookie == cookie) {
-			TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
+	TAILQ_FOREACH_SAFE(bp, &nc->nc_inflight, bio_queue, bp2) {
+		if (nbd_inflight_get_cookie(bp) == cookie) {
+			bio_queue_remove(&nc->nc_inflight, bp);
 			break;
 		}
 	}
 	mtx_unlock(&nc->nc_inflight_mtx);
-	if (__predict_false(ni != NULL &&
+	if (__predict_false(bp != NULL &&
 	    atomic_load_bool(&nc->nc_softc->sc_flushing))) {
-		switch (ni->ni_bio->bio_cmd) {
+		switch (bp->bio_cmd) {
 		case BIO_DELETE:
 		case BIO_WRITE:
-			wakeup_one(ni);
+			wakeup_one(&bp->bio_driver1);
 		}
 	}
-	return (ni);
+	return (bp);
 }
 
 static int
@@ -794,7 +817,6 @@ nbd_conn_recv(struct nbd_conn *nc)
 	/* TODO: structured replies if negotiated */
 	struct nbd_simple_reply reply;
 	struct mbuf *m;
-	struct nbd_inflight *ni;
 	struct bio *bp;
 	int error;
 
@@ -812,21 +834,20 @@ nbd_conn_recv(struct nbd_conn *nc)
 		return;
 	}
 	/* TODO: structured replies can have multiple replies per cookie */
-	ni = nbd_conn_remove_inflight(nc, reply.cookie);
-	if (__predict_false(ni == NULL)) {
+	bp = nbd_conn_remove_inflight(nc, reply.cookie);
+	if (__predict_false(bp == NULL)) {
 		G_NBD_LOG(G_NBD_ERROR,
 		    "%s did not find inflight bio for cookie %lu", __func__,
 		    reply.cookie);
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 		return;
 	}
-	bp = ni->ni_bio;
 	if (__predict_false(reply.error != 0)) {
 		G_NBD_LOGREQ(G_NBD_WARN, bp,
 		    "%s received reply with error (%d)", __func__, reply.error);
 		if (reply.error == NBD_ESHUTDOWN)
 			nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
-		nbd_inflight_deliver(ni, nbd_error_to_errno(reply.error));
+		nbd_inflight_deliver(bp, nbd_error_to_errno(reply.error));
 		return;
 	}
 	/* TODO: see comment above soreceive in nbd_conn_recv_mbufs */
@@ -846,11 +867,11 @@ nbd_conn_recv(struct nbd_conn *nc)
 			}
 			error = nbd_conn_recv_mbufs(nc, len, &m);
 			if (__predict_false(error != 0)) {
-				nbd_inflight_deliver(ni, error);
+				nbd_inflight_deliver(bp, error);
 				return;
 			}
 			CTR3(KTR_NBD, "%s nc=%p cookie=%lu received read data",
-			    __func__, nc, ni->ni_cookie);
+			    __func__, nc, nbd_inflight_get_cookie(bp));
 			if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 				vm_offset_t vaddr;
 				size_t page_offset =
@@ -861,7 +882,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 
 				CTR3(KTR_NBD,
 				    "%s nc=%p cookie=%lu unmapped read",
-				    __func__, nc, ni->ni_cookie);
+				    __func__, nc, nbd_inflight_get_cookie(bp));
 				for (int i = OFF_TO_IDX(offset + page_offset);
 				    resid1 > 0; i++) {
 					len1 = MIN(resid1,
@@ -878,7 +899,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 				}
 			} else {
 				CTR3(KTR_NBD, "%s nc=%p cookie=%lu mapped read",
-				    __func__, nc, ni->ni_cookie);
+				    __func__, nc, nbd_inflight_get_cookie(bp));
 				m_copydata(m, 0, len, bp->bio_data + offset);
 			}
 			m_freem(m);
@@ -888,14 +909,14 @@ nbd_conn_recv(struct nbd_conn *nc)
 	}
 	bp->bio_completed = bp->bio_length;
 	bp->bio_resid = 0;
-	nbd_inflight_deliver(ni, 0);
+	nbd_inflight_deliver(bp, 0);
 }
 
 static void
 g_nbd_flush_wait(struct g_nbd_softc *sc)
 {
 	struct nbd_conn *nc;
-	struct nbd_inflight *ni;
+	struct bio *bp;
 
 	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
 	mtx_lock(&sc->sc_conns_mtx);
@@ -903,12 +924,13 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 		mtx_lock(&nc->nc_inflight_mtx);
 restart:
-		TAILQ_FOREACH(ni, &nc->nc_inflight, ni_inflight) {
-			switch (ni->ni_bio->bio_cmd) {
+		TAILQ_FOREACH(bp, &nc->nc_inflight, bio_queue) {
+			switch (bp->bio_cmd) {
 			case BIO_DELETE:
 			case BIO_WRITE:
-				mtx_sleep(ni, &nc->nc_inflight_mtx, PRIBIO,
-				    "gnbd:flush", 0);
+				mtx_sleep(&bp->bio_driver1,
+				    &nc->nc_inflight_mtx, PRIBIO, "gnbd:flush",
+				    0);
 				/* Have to start over, the lock was dropped. */
 				goto restart;
 			}
@@ -1007,17 +1029,14 @@ nbd_conn_close(struct nbd_conn *nc)
 	soclose(so);
 }
 
-static inline struct bio *
-nbd_inflight_cancel(struct nbd_inflight *ni)
+static inline void
+nbd_inflight_cancel(struct bio *bp)
 {
-	struct bio *bp = ni->ni_bio;
 	bool last __diagused;
 
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, ni->ni_cookie);
-	last = refcount_release(&ni->ni_refs);
-	KASSERT(last, ("nbd_inflight %p still referenced", ni));
-	uma_zfree(g_nbd_inflight_zone, ni);
-	return (bp);
+	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
+	last = nbd_inflight_release(bp);
+	KASSERT(last, ("inflight bio %p still referenced", bp));
 }
 
 static inline void
@@ -1026,10 +1045,15 @@ bio_queue_init(struct bio_queue *queue)
 	TAILQ_INIT(queue);
 }
 
-static inline void
-bio_queue_insert_tail(struct bio_queue *queue, struct bio *bp)
+static inline struct bio *
+bio_queue_takefirst(struct bio_queue *queue)
 {
-	TAILQ_INSERT_TAIL(queue, bp, bio_queue);
+	struct bio *bp;
+
+	bp = TAILQ_FIRST(queue);
+	if (bp != NULL)
+		bio_queue_remove(queue, bp);
+	return (bp);
 }
 
 static inline bool
@@ -1050,7 +1074,6 @@ static inline void
 nbd_conn_drain_inflight(struct nbd_conn *nc)
 {
 	struct g_nbd_softc *sc = nc->nc_softc;
-	struct nbd_inflight *ni;
 	struct bio_queue tmp;
 	struct bio *bp;
 	bool first;
@@ -1058,9 +1081,8 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
 	bio_queue_init(&tmp);
 	mtx_lock(&nc->nc_inflight_mtx);
-	while ((ni = TAILQ_FIRST(&nc->nc_inflight)) != NULL) {
-		TAILQ_REMOVE(&nc->nc_inflight, ni, ni_inflight);
-		bp = nbd_inflight_cancel(ni);
+	while ((bp = bio_queue_takefirst(&nc->nc_inflight)) != NULL) {
+		nbd_inflight_cancel(bp);
 		/*
 		 * FIXME: This is incorrect, yet necessary for now.
 		 * Need a way to reissue the flush in the correct position in
@@ -1070,8 +1092,7 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 			switch (bp->bio_cmd) {
 			case BIO_DELETE:
 			case BIO_WRITE:
-				/* XXX: uses address only, not accessed */
-				wakeup_one(ni);
+				wakeup_one(&bp->bio_driver1);
 			}
 		}
 		bio_queue_insert_tail(&tmp, bp);
@@ -1089,17 +1110,6 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 		if (first)
 			wakeup(&sc->sc_queue);
 	}
-}
-
-static inline struct bio *
-bio_queue_takefirst(struct bio_queue *queue)
-{
-	struct bio *bp;
-
-	bp = TAILQ_FIRST(queue);
-	if (bp != NULL)
-		TAILQ_REMOVE(queue, bp, bio_queue);
-	return (bp);
 }
 
 static inline void
@@ -1153,7 +1163,6 @@ nbd_conn_sender(void *arg)
 	struct nbd_conn *nc = arg;
 	struct g_nbd_softc *sc = nc->nc_softc;
 	struct socket *so = nc->nc_socket;
-	struct nbd_inflight *ni;
 	struct bio *bp;
 	bool notify;
 
@@ -1192,14 +1201,8 @@ nbd_conn_sender(void *arg)
 			 * Put the bio in the inflight queue before sending the
 			 * request to avoid racing with the receiver thread.
 			 */
-			ni = nbd_conn_enqueue_inflight(nc, bp);
-			if (__predict_false(ni == NULL)) {
-				sx_xunlock(&sc->sc_flush_lock);
-				counter_u64_add(g_nbd_enomems, 1);
-				g_io_deliver(bp, ENOMEM);
-				continue;
-			}
-			nbd_conn_send(nc, ni);
+			nbd_conn_enqueue_inflight(nc, bp);
+			nbd_conn_send(nc, bp);
 			sx_xunlock(&sc->sc_flush_lock);
 		} else {
 			/*
@@ -1212,16 +1215,11 @@ nbd_conn_sender(void *arg)
 				 *  across the connections.
 				 */
 				sx_slock(&sc->sc_flush_lock);
-				ni = nbd_conn_enqueue_inflight(nc, bp);
+				nbd_conn_enqueue_inflight(nc, bp);
 				sx_sunlock(&sc->sc_flush_lock);
 			} else
-				ni = nbd_conn_enqueue_inflight(nc, bp);
-			if (__predict_false(ni == NULL)) {
-				counter_u64_add(g_nbd_enomems, 1);
-				g_io_deliver(bp, ENOMEM);
-				continue;
-			}
-			nbd_conn_send(nc, ni);
+				nbd_conn_enqueue_inflight(nc, bp);
+			nbd_conn_send(nc, bp);
 		}
 	}
 	if (atomic_load_int(&nc->nc_state) == NBD_CONN_SOFT_DISCONNECTING) {
@@ -1324,7 +1322,7 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	nc->nc_softc = sc;
 	nc->nc_socket = so;
 	nc->nc_state = NBD_CONN_CONNECTED;
-	TAILQ_INIT(&nc->nc_inflight);
+	bio_queue_init(&nc->nc_inflight);
 	mtx_init(&nc->nc_inflight_mtx, "gnbd:inflight", NULL, MTX_DEF);
 	cv_init(&nc->nc_send_cv, "gnbd:send");
 	cv_init(&nc->nc_receive_cv, "gnbd:receive");
@@ -1911,9 +1909,6 @@ g_nbd_init(struct g_class *mp __unused)
 	CTR1(KTR_NBD, "%s", __func__);
 	sx_init(&g_nbd_lock, "GEOM NBD connections");
 	g_nbd_unit = new_unrhdr(0, INT_MAX, NULL);
-	g_nbd_inflight_zone = uma_zcreate("nbd_inflight",
-	    sizeof(struct nbd_inflight), NULL, NULL, NULL, NULL,
-	    UMA_ALIGN_PTR, 0);
 	sz = sizeof(g_nbd_tlsmax);
 	if (kernel_sysctlbyname(curthread, "kern.ipc.tls.maxlen",
 	    &g_nbd_tlsmax, &sz, NULL, 0, NULL, 0) != 0)
@@ -1925,7 +1920,6 @@ g_nbd_fini(struct g_class *mp __unused)
 {
 	CTR1(KTR_NBD, "%s", __func__);
 	KASSERT(g_nbd_nconns == 0, ("connections still running"));
-	uma_zdestroy(g_nbd_inflight_zone);
 	delete_unrhdr(g_nbd_unit);
 	sx_destroy(&g_nbd_lock);
 }
