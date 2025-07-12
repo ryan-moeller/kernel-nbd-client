@@ -319,73 +319,107 @@ Then at the (lldb) prompt:
 ```
 (lldb) script dofile 'kernel-nbd-client/gnbd.lua'
 (g_nbd_softc) *nc_softc = {
-  sc_host = 0xfffff8033c562130 "localhost"
-  sc_port = 0xfffff80003848e00 "10809"
-  sc_name = 0xfffff8000369a520 ""
+  sc_host = 0xfffff80003613090 "localhost"
+  sc_port = 0xfffff80003613080 "10809"
+  sc_name = 0xfffff80003613070 "mbp"
   sc_description = 0x0000000000000000
-  sc_size = 4294967296
+  sc_size = 549755813888
    = {
-    sc_flags = 21037059
-     = (sc_handshake_flags = 3, sc_transmission_flags = 321)
+    sc_flags = 158138371
+     = (sc_handshake_flags = 3, sc_transmission_flags = 2413)
   }
   sc_minblocksize = 512
-  sc_prefblocksize = 4096
-  sc_maxpayload = 262144
+  sc_prefblocksize = 16384
+  sc_maxpayload = 1048576
   sc_unit = 0
-  sc_tls = true
-  sc_provider = 0xfffff803bc6b1800
+  sc_tls = false
+  sc_geom = 0xfffff8003d1af100
+  sc_provider = 0xfffff80003344000
   sc_queue = {
     tqh_first = NULL
-    tqh_last = 0xfffff803bbbca448
+    tqh_last = 0xfffff80003347150
   }
   sc_queue_mtx = {
-    lock_object = (lo_name = "gnbd:queue", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb89a80)
+    lock_object = (lo_name = "gnbd:queue", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb8b700)
     mtx_lock = 0
   }
   sc_connections = {
-    slh_first = 0xfffff80003550e00
+    slh_first = 0xfffff80003e5b000
   }
   sc_nconns = 2
+  sc_nactive = 2
   sc_conns_mtx = {
-    lock_object = (lo_name = "gnbd:connections", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb89b00)
+    lock_object = (lo_name = "gnbd:connections", lo_flags = 16973824, lo_data = 0, lo_witness = 0xfffff8085eb8b780)
     mtx_lock = 0
   }
+  sc_flushing = false
   sc_flush_lock = {
-    lock_object = (lo_name = "gnbd:flush", lo_flags = 36896768, lo_data = 0, lo_witness = 0xfffff8085eb89b80)
+    lock_object = (lo_name = "gnbd:flush", lo_flags = 36896768, lo_data = 0, lo_witness = 0xfffff8085eb8b800)
     sx_lock = 1
   }
 }
-(nbd_conn *) 0xfffff8000b046400
-(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 1
-thread #15: tid = 114432, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8029fc44740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 sender'
-frame #5: 0xffffffff830486a6 geom_nbd.ko`nbd_conn_sender(arg=0xfffff8000b046400) at g_nbd.c:899:4
-thread #16: tid = 114815, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff806a9b24740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 receiver'
-frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff8000b046400) at g_nbd.c:976:3
+(nbd_conn *) 0xfffff80003d8ca00
+(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 2624849
+thread #31: tid = 101027, 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff8006876a780, flags=259) at sched_ule.c:2448:26, name = '(pid 6052) gnbd/gnbd nbd0 sender'
+frame #5: 0xffffffff834b2a4b geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003d8ca00) at g_nbd.c:1188:4
+Full Backtrace:
+frame #0: 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff8006876a780, flags=259) at sched_ule.c:2448:26
+frame #1: 0xffffffff80b82462 kernel`mi_switch(flags=259) at kern_synch.c:530:2
+frame #2: 0xffffffff80bd80c9 kernel`sleepq_switch(wchan=0xfffff80003347150, pri=<unavailable>) at subr_sleepqueue.c:608:2
+frame #3: 0xffffffff80bd7f9c kernel`sleepq_wait(wchan=<unavailable>, pri=<unavailable>) at subr_sleepqueue.c:659:2 [artificial]
+frame #4: 0xffffffff80b819e5 kernel`_sleep(ident=0xfffff80003347150, lock=0xfffff80003347160, priority=555, wmesg="gnbd:queue", sbt=0, pr=0, flags=256) at kern_synch.c:221:3
+frame #5: 0xffffffff834b2a4b geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003d8ca00) at g_nbd.c:1188:4
+frame #6: 0xffffffff80b25ca2 kernel`fork_exit(callout=(geom_nbd.ko`nbd_conn_sender at g_nbd.c:1163), arg=0xfffff80003d8ca00, frame=0xfffffe013d57ff40) at kern_fork.c:1153:2
+frame #7: 0xffffffff810950de kernel`fork_trampoline at exception.S:1065
+thread #32: tid = 101121, 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff802a0a50780, flags=259) at sched_ule.c:2448:26, name = '(pid 6052) gnbd/gnbd nbd0 receiver'
+frame #7: 0xffffffff834b2c8e geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003d8ca00) at g_nbd.c:1259:3
+Full Backtrace:
+frame #0: 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff802a0a50780, flags=259) at sched_ule.c:2448:26
+frame #1: 0xffffffff80b82462 kernel`mi_switch(flags=259) at kern_synch.c:530:2
+frame #2: 0xffffffff80bd80c9 kernel`sleepq_switch(wchan=0xfffff80003d8ca60, pri=<unavailable>) at subr_sleepqueue.c:608:2
+frame #3: 0xffffffff80bd7f9c kernel`sleepq_wait(wchan=<unavailable>, pri=<unavailable>) at subr_sleepqueue.c:659:2 [artificial]
+frame #4: 0xffffffff80af9b00 kernel`_cv_wait(cvp=0xfffff80003d8ca60, lock=0xfffff8006f6001e0) at kern_condvar.c:153:2
+frame #5: 0xffffffff834b5c0e geom_nbd.ko`nbd_conn_recv_mbufs(nc=0xfffff80003d8ca00, len=16, mp=0xfffffe013d4dae90) at g_nbd.c:806:4
+frame #6: 0xffffffff834b5511 geom_nbd.ko`nbd_conn_recv(nc=0xfffff80003d8ca00) at g_nbd.c:864:10
+frame #7: 0xffffffff834b2c8e geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003d8ca00) at g_nbd.c:1259:3
+frame #8: 0xffffffff80b25ca2 kernel`fork_exit(callout=(geom_nbd.ko`nbd_conn_receiver at g_nbd.c:1246), arg=0xfffff80003d8ca00, frame=0xfffffe013d4daf40) at kern_fork.c:1153:2
+frame #9: 0xffffffff810950de kernel`fork_trampoline at exception.S:1065
 socket[
   options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
-  snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
-  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+  snd<flags<AUTOSIZE,UPCALL>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<1572865>>,
+  rcv<flags<UPCALL>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
 ]
-(nbd_inflight) *tqh_first = {
-  ni_bio = 0xfffff805cf00c900
-  ni_cookie = 0
-  ni_refs = 1
-  ni_inflight = {
-    tqe_next = NULL
-    tqe_prev = 0xfffff8000b046420
-  }
-}
-bio[READ<0>4294963200:4096]
-(nbd_conn *) 0xfffff80003550e00
-(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 0
-thread #17: tid = 114816, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8028d4ff000, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 sender'
-frame #5: 0xffffffff830486a6 geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003550e00) at g_nbd.c:899:4
-thread #18: tid = 114817, 0xffffffff80b89ce0 kernel`sched_switch(td=0xfffff8029fc40740, flags=259) at sched_ule.c:2290:26, name = '(pid 35826) gnbd/gnbd nbd0 receiver'
-frame #9: 0xffffffff830489d9 geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003550e00) at g_nbd.c:976:3
+(inflight bio) cookie=2624848 refs=1 bio[READ<UNMAPPED>137438953472:512]
+(nbd_conn *) 0xfffff80003e5b000
+(nbd_conn_state) nc_state = NBD_CONN_CONNECTED  (uint64_t) nc_seq = 160134
+thread #33: tid = 101122, 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff802a0a53780, flags=259) at sched_ule.c:2448:26, name = '(pid 6052) gnbd/gnbd nbd0 sender'
+frame #5: 0xffffffff834b2a4b geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003e5b000) at g_nbd.c:1188:4
+Full Backtrace:
+frame #0: 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff802a0a53780, flags=259) at sched_ule.c:2448:26
+frame #1: 0xffffffff80b82462 kernel`mi_switch(flags=259) at kern_synch.c:530:2
+frame #2: 0xffffffff80bd80c9 kernel`sleepq_switch(wchan=0xfffff80003347150, pri=<unavailable>) at subr_sleepqueue.c:608:2
+frame #3: 0xffffffff80bd7f9c kernel`sleepq_wait(wchan=<unavailable>, pri=<unavailable>) at subr_sleepqueue.c:659:2 [artificial]
+frame #4: 0xffffffff80b819e5 kernel`_sleep(ident=0xfffff80003347150, lock=0xfffff80003347160, priority=555, wmesg="gnbd:queue", sbt=0, pr=0, flags=256) at kern_synch.c:221:3
+frame #5: 0xffffffff834b2a4b geom_nbd.ko`nbd_conn_sender(arg=0xfffff80003e5b000) at g_nbd.c:1188:4
+frame #6: 0xffffffff80b25ca2 kernel`fork_exit(callout=(geom_nbd.ko`nbd_conn_sender at g_nbd.c:1163), arg=0xfffff80003e5b000, frame=0xfffffe013d610f40) at kern_fork.c:1153:2
+frame #7: 0xffffffff810950de kernel`fork_trampoline at exception.S:1065
+thread #34: tid = 101123, 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff80266920000, flags=259) at sched_ule.c:2448:26, name = '(pid 6052) gnbd/gnbd nbd0 receiver'
+frame #7: 0xffffffff834b2c8e geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003e5b000) at g_nbd.c:1259:3
+Full Backtrace:
+frame #0: 0xffffffff80ba81f2 kernel`sched_switch(td=0xfffff80266920000, flags=259) at sched_ule.c:2448:26
+frame #1: 0xffffffff80b82462 kernel`mi_switch(flags=259) at kern_synch.c:530:2
+frame #2: 0xffffffff80bd80c9 kernel`sleepq_switch(wchan=0xfffff80003e5b060, pri=<unavailable>) at subr_sleepqueue.c:608:2
+frame #3: 0xffffffff80bd7f9c kernel`sleepq_wait(wchan=<unavailable>, pri=<unavailable>) at subr_sleepqueue.c:659:2 [artificial]
+frame #4: 0xffffffff80af9b00 kernel`_cv_wait(cvp=0xfffff80003e5b060, lock=0xfffff8006f6085e0) at kern_condvar.c:153:2
+frame #5: 0xffffffff834b5c0e geom_nbd.ko`nbd_conn_recv_mbufs(nc=0xfffff80003e5b000, len=16, mp=0xfffffe013d642e90) at g_nbd.c:806:4
+frame #6: 0xffffffff834b5511 geom_nbd.ko`nbd_conn_recv(nc=0xfffff80003e5b000) at g_nbd.c:864:10
+frame #7: 0xffffffff834b2c8e geom_nbd.ko`nbd_conn_receiver(arg=0xfffff80003e5b000) at g_nbd.c:1259:3
+frame #8: 0xffffffff80b25ca2 kernel`fork_exit(callout=(geom_nbd.ko`nbd_conn_receiver at g_nbd.c:1246), arg=0xfffff80003e5b000, frame=0xfffffe013d642f40) at kern_fork.c:1153:2
+frame #9: 0xffffffff810950de kernel`fork_trampoline at exception.S:1065
 socket[
   options<KEEPALIVE>, state<ISCONNECTED>, error<0>, rerror<0>,
-  snd<flags<AUTOSIZE>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<2048>>,
-  rcv<flags<TLS_RX,TLS_RX_RESYNC,AUTOSIZE,WAIT>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
+  snd<flags<AUTOSIZE,UPCALL>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<1572865>>,
+  rcv<flags<UPCALL>,state<0>,acc<0>,ccc<0>,hiwat<1572864>,lowat<16>>
 ]
 (lldb)
 ```

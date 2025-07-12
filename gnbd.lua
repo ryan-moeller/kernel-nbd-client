@@ -164,12 +164,12 @@ end
 
 function iter_inflight(nc)
 	local head = nc:GetChildMemberWithName("nc_inflight")
-	local ni = head:GetChildMemberWithName("tqh_first")
+	local bp = head:GetChildMemberWithName("tqh_first")
 	return function ()
-		while ni:GetValueAsSigned() ~= 0 do
-			local link = ni:GetChildMemberWithName("ni_inflight")
-			local current = ni
-			ni = link:GetChildMemberWithName("tqe_next")
+		while bp:GetValueAsSigned() ~= 0 do
+			local link = bp:GetChildMemberWithName("bio_queue")
+			local current = bp
+			bp = link:GetChildMemberWithName("tqe_next")
 			return current
 		end
 		return nil
@@ -315,10 +315,11 @@ function bio_summary(bp)
 	return string.format("bio[%s<%s>%d:%d]", cmd, flags, offset, length)
 end
 
-function inflight_summary(ni)
-	local cookie = ni:GetChildMemberWithName("ni_cookie"):GetValueAsUnsigned()
-	local bio = ni:GetChildMemberWithName("ni_bio")
-	return string.format("(nbd_inflight) cookie=%d %s", cookie, bio_summary(bio))
+function inflight_summary(bp)
+	local cookie = bp:GetChildMemberWithName("bio_driver1"):GetValueAsUnsigned()
+	local refs = bp:GetChildMemberWithName("bio_driver2"):GetValueAsUnsigned()
+	return string.format("(inflight bio) cookie=%u refs=%u %s", cookie, refs,
+	    bio_summary(bp))
 end
 
 function thread_summary(frame)
@@ -354,8 +355,8 @@ for sc, instance in pairs(instances) do
 			print("no receiver thread")
 		end
 		print(socket_summary(socket))
-		for ni in iter_inflight(nc) do
-			print(inflight_summary(ni))
+		for bp in iter_inflight(nc) do
+			print(inflight_summary(bp))
 		end
 	end
 end
