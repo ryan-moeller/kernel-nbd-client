@@ -15,6 +15,7 @@
  **/
 
 #define NBD_DEFAULT_PORT "10809"
+#define NBD_MAX_STRING 4096
 
 /*
  * Negotiation handshake

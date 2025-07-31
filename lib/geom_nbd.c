@@ -62,6 +62,7 @@ static void nbd_scale(struct gctl_req *req, unsigned flags);
 struct g_command class_commands[] = {
 	{ "connect", G_FLAG_LOADKLD, nbd_connect,
 	    {
+		{ 'S', "simple", NULL, G_TYPE_BOOL },
 		{ 'c', "connections", "1", G_TYPE_NUMBER },
 		{ 'n', "name", "", G_TYPE_STRING },
 		{ 'p', "port", NBD_DEFAULT_PORT, G_TYPE_STRING },
@@ -70,7 +71,7 @@ struct g_command class_commands[] = {
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "[-c num] [-n name] [-p port] "
+	    "[-S] [-c num] [-n name] [-p port] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
@@ -592,12 +593,10 @@ nbd_info_block_size_ntoh(struct nbd_info_block_size *bs)
 	bs->maximum_payload = be32toh(bs->maximum_payload);
 }
 
-/*
- * TODO: structured replies
- */
 static int
 nbd_client_negotiate_options(struct nbd_client *client, bool first)
 {
+	struct nbd_option_reply reply;
 	struct gctl_req *req = client->req;
 	uint8_t *buf, *p;
 	uint16_t info_requests[] = {
@@ -614,6 +613,24 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 	    sizeof(be_n_info_requests) +
 	    sizeof(info_requests[0]) * n_info_requests;
 
+	/*
+	 * Try to negotiate structured replies by default, but allow the user
+	 * to opt out.  Fall back to simple replies if the server refuses the
+	 * option.  The kernel handles all replies based on the reply header,
+	 * regardless of what was negotiated.
+	 */
+	if (gctl_get_int(req, "simple") == 0) {
+		if (nbd_client_send_option(client, NBD_OPTION_STRUCTURED_REPLY,
+		    NULL, 0) != 0)
+			return (-1);
+		if (nbd_client_recv_option_reply(client, &reply,
+		    NBD_OPTION_STRUCTURED_REPLY) != 0)
+			return (-1);
+		if (reply.type != NBD_REPLY_ACK)
+			/* TODO: verbosity control */
+			fprintf(stderr,
+			    "Server rejected structured reply option\n");
+	}
 	p = buf = malloc(buflen);
 	assert(buf != NULL); /* can't do much if ENOMEM */
 	p = mempcpy(p, &be_namelen, sizeof(be_namelen));
@@ -626,7 +643,6 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 	}
 	free(buf);
 	for (bool saw_export = false;;) {
-		struct nbd_option_reply reply;
 		uint16_t info_type;
 
 		if (nbd_client_recv_option_reply(client, &reply, NBD_OPTION_GO)
@@ -1160,11 +1176,11 @@ scale_common(struct gctl_req *req, bool reconnect)
 	struct gmesh mesh;
 	struct gclass *mp;
 	struct ggeom *gp;
-	const char *classname, *geomname, *name;
+	const char *classname, *geomname, *name, *simple;
 	const char *active, *connections, *tflags, *cfgtls;
 	int *sockets = NULL;
 	intmax_t nconns, delay;
-	int nargs, nactive, nsockets;
+	int nargs, nactive, nsockets, bsimple;
 	bool tls;
 
 	nargs = gctl_get_int(req, "nargs");
@@ -1286,6 +1302,13 @@ scale_common(struct gctl_req *req, bool reconnect)
 	}
 	client.name = strdup(name);
 	assert(client.name != NULL); /* can't do much if ENOMEM */
+	simple = find_config(gp, "Simple");
+	if (simple == NULL) {
+		gctl_error(req, "Invalid config (missing Simple).");
+		goto free;
+	}
+	bsimple = strcmp(simple, "yes") == 0;
+	gctl_ro_param(req, "simple", sizeof(bsimple), &bsimple);
 	sockets = make_connections(&client, req, nsockets, delay);
 	if (sockets == NULL)
 		goto free;

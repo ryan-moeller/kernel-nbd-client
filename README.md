@@ -18,6 +18,7 @@ This client supports the following noteworthy features:
 * Established connections are handed off to the kernel, allowing reroot onto the
   network-backed devices.
 * Supports using multiple connections to the NBD server to parallelize commands.
+* Supports structured replies with an option to force simple replies.
 * Supports optional TLS encryption using ktls(4).
 * Zero copies are performed for writes where possible.  Work is needed to
   support cxgbe(4) TCP-offload module DDP for zero-copy reads.
