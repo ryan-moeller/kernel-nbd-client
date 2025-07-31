@@ -21,6 +21,7 @@ utility:
 .Nm
 .Cm connect
 .Op Fl v
+.Op Fl S
 .Op Fl c Ar num
 .Op Fl n Ar name
 .Op Fl p Ar port
@@ -28,6 +29,7 @@ utility:
 .Nm
 .Cm connect
 .Op Fl v
+.Op Fl S
 .Op Fl c Ar num
 .Op Fl n Ar name
 .Op Fl p Ar port
@@ -123,6 +125,11 @@ indicates an action to be performed:
 .It Cm connect
 Connect to an NBD server.
 .Bl -tag -width Fl
+.It Fl S
+Do not negotiate structured replies during option haggling.
+The server should use simple replies instead.
+The default is to negotiate the structured replies option and fall back to
+simple replies with an error message if the option is rejected by the server.
 .It Fl c Ar connections
 Use this many parallel connections.
 One connection is used if not specified.
