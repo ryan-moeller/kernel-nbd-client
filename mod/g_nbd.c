@@ -146,6 +146,7 @@ struct g_nbd_softc {
 	uint32_t	sc_maxpayload;
 	u_int		sc_unit;
 	bool		sc_tls;
+	bool		sc_simple;
 	struct g_geom	*sc_geom;
 	struct g_provider	*sc_provider;
 	struct bio_queue	sc_queue;
@@ -296,6 +297,10 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 {
 	CTR4(KTR_NBD, "%s nc=%p bp=%p cookie=%lu", __func__, nc, bp,
 	    nc->nc_seq);
+	MPASS(bp->bio_resid == 0);
+	MPASS(bp->bio_completed == 0);
+	if (bp->bio_cmd == BIO_READ)
+		bp->bio_resid = bp->bio_length;
 	nbd_inflight_set_cookie(bp, nc->nc_seq++);
 	mtx_lock(&nc->nc_inflight_mtx);
 	bio_queue_insert_tail(&nc->nc_inflight, bp);
@@ -660,22 +665,39 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 }
 
 static inline void
+nbd_reply_magic_ntoh(uint32_t *magic)
+{
+	*magic = be32toh(*magic);
+}
+
+static inline void
 nbd_simple_reply_ntoh(struct nbd_simple_reply *reply)
 {
-	reply->magic = be32toh(reply->magic);
+	/* reply->magic = be32toh(reply->magic); */
 	reply->error = be32toh(reply->error);
 	reply->cookie = be64toh(reply->cookie);
 }
 
-static inline bool
-nbd_simple_reply_is_valid(struct nbd_simple_reply *reply)
+static inline void
+nbd_structured_reply_ntoh(struct nbd_structured_reply *reply)
 {
-	if (__predict_false(reply->magic != NBD_SIMPLE_REPLY_MAGIC)) {
-		G_NBD_LOG(G_NBD_INFO, "magic=0x%08x != 0x%08x", reply->magic,
-		    NBD_SIMPLE_REPLY_MAGIC);
-		return (false);
-	}
-	return (true);
+	/* reply->magic = be32toh(reply->magic); */
+	reply->flags = be16toh(reply->flags);
+	reply->type = be16toh(reply->type);
+	reply->cookie = be64toh(reply->cookie);
+	reply->length = be32toh(reply->length);
+}
+
+static inline bool
+nbd_structured_reply_done(struct nbd_structured_reply *reply)
+{
+	return ((reply->flags & NBD_REPLY_FLAG_DONE) != 0);
+}
+
+static inline bool
+nbd_structured_reply_error(struct nbd_structured_reply *reply)
+{
+	return ((reply->type & NBD_REPLY_TYPE_ERROR_BIT) != 0);
 }
 
 static inline int
@@ -724,6 +746,24 @@ nbd_conn_recv_ok(struct nbd_conn *nc)
 		return (false);
 	}
 	return (true);
+}
+
+static struct bio *
+nbd_conn_find_inflight(struct nbd_conn *nc, uint64_t cookie)
+{
+	struct bio *bp;
+
+	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, cookie);
+	mtx_lock(&nc->nc_inflight_mtx);
+	TAILQ_FOREACH(bp, &nc->nc_inflight, bio_queue)
+		if (nbd_inflight_get_cookie(bp) == cookie)
+			/*
+			 * Only one thread services replies for this queue, so
+			 * no additional ref is needed.
+			 */
+			break;
+	mtx_unlock(&nc->nc_inflight_mtx);
+	return (bp);
 }
 
 static struct bio *
@@ -864,49 +904,400 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	return (0);
 }
 
+/*
+ * Layout of reply headers is such that magic and cookie fields are at the same
+ * offset in both simple and structured replies.  We also have a convenience
+ * variant for direct access to the magic field.
+ */
+union nbd_reply {
+	uint32_t magic;
+	struct nbd_simple_reply simple;
+	struct nbd_structured_reply structured;
+};
+
+_Static_assert(offsetof(union nbd_reply, magic) ==
+    offsetof(union nbd_reply, simple.magic),
+    "fatal union nbd_reply layout");
+_Static_assert(offsetof(union nbd_reply, magic) ==
+    offsetof(union nbd_reply, structured.magic),
+    "fatal union nbd_reply layout");
+_Static_assert(offsetof(union nbd_reply, simple.cookie) ==
+    offsetof(union nbd_reply, structured.cookie),
+    "fatal union nbd_reply layout");
+
+static inline void
+nbd_reply_ntoh(union nbd_reply *reply)
+{
+	if (reply->magic == NBD_SIMPLE_REPLY_MAGIC)
+		nbd_simple_reply_ntoh(&reply->simple);
+	else
+		nbd_structured_reply_ntoh(&reply->structured);
+}
+
+static inline bool
+nbd_reply_done(union nbd_reply *reply)
+{
+	return (reply->magic == NBD_SIMPLE_REPLY_MAGIC ||
+	    nbd_structured_reply_done(&reply->structured));
+}
+
+static inline void
+nbd_reply_error_ntoh(struct nbd_reply_error *reply_error)
+{
+	reply_error->error = be32toh(reply_error->error);
+	reply_error->length = be16toh(reply_error->error);
+}
+
+static inline void
+nbd_reply_error_offset_ntoh(struct nbd_reply_error_offset *reply_error_offset)
+{
+	reply_error_offset->offset = be64toh(reply_error_offset->offset);
+}
+
+static inline void
+nbd_conn_drop_inflight_structured_reply(struct nbd_conn *nc, struct bio *bp,
+    struct nbd_structured_reply *reply, int error)
+{
+	if (!nbd_structured_reply_done(reply))
+		nbd_conn_remove_inflight_specific(nc, bp);
+	nbd_inflight_deliver(bp, error);
+}
+
+static void
+nbd_conn_recv_error(struct nbd_conn *nc, struct nbd_structured_reply *reply,
+    struct bio *bp)
+{
+	char message[NBD_MAX_STRING];
+	struct nbd_reply_error reply_error;
+	struct nbd_reply_error_offset reply_error_offset;
+	struct mbuf *m;
+	size_t minlen;
+	int error;
+
+	CTR4(KTR_NBD, "%s nc=%p cookie=%lu bp=%p", __func__, nc, reply->cookie,
+	    bp);
+	minlen = sizeof(reply_error);
+	if (reply->type == NBD_REPLY_TYPE_ERROR_OFFSET)
+		minlen += sizeof(reply_error_offset);
+	if (reply->length < minlen) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp,
+		    "%s invalid reply length (%u < %zu)", __func__,
+		    reply->length, minlen);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		nbd_conn_drop_inflight_structured_reply(nc, bp, reply, EIO);
+		return;
+	}
+	error = nbd_conn_recv_mbufs(nc, reply->length, &m);
+	if (error != 0) {
+		nbd_conn_drop_inflight_structured_reply(nc, bp, reply, error);
+		return;
+	}
+	m_copydata(m, 0, sizeof(reply_error), (void *)&reply_error);
+	nbd_reply_error_ntoh(&reply_error);
+	if (reply_error.error == NBD_ESHUTDOWN)
+		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
+	if (nbd_structured_reply_done(reply))
+		nbd_inflight_deliver(bp, nbd_error_to_errno(reply_error.error));
+	else
+		/* More chunks to follow; just set the error. */
+		atomic_cmpset_int(&bp->bio_error, 0,
+		    nbd_error_to_errno(reply_error.error));
+	if (reply_error.length > sizeof(message) ||
+	    reply_error.length > (reply->length - minlen)) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s invalid error length (%hu)",
+		    __func__, reply_error.length);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		m_freem(m);
+		return;
+	}
+	if (reply_error.length > 0) {
+		m_copydata(m, sizeof(reply_error), reply_error.length, message);
+		/* XXX: There should be better way to log the error message. */
+		G_NBD_LOGREQ(G_NBD_WARN, bp, "%s error message: %.*s", __func__,
+		    reply_error.length, message);
+	}
+	if (reply->type == NBD_REPLY_TYPE_ERROR_OFFSET) {
+		m_copydata(m, sizeof(reply_error) + reply_error.length,
+		    sizeof(reply_error_offset), (void *)&reply_error_offset);
+		nbd_reply_error_offset_ntoh(&reply_error_offset);
+		/* XXX: This isn't a very useful way to deliver this info. */
+		G_NBD_LOGREQ(G_NBD_INFO, bp, "%s error offset: %lu", __func__,
+		    reply_error_offset.offset);
+	}
+	m_freem(m);
+}
+
+static inline void
+nbd_reply_offset_data_ntoh(struct nbd_reply_offset_data *reply_offset_data)
+{
+	reply_offset_data->offset = be64toh(reply_offset_data->offset);
+}
+
+static inline bool
+bio_range_valid(struct bio *bp, size_t offset, size_t length)
+{
+	/* Overflow check. */
+	if (offset > SIZE_MAX - length)
+		return (false);
+	/* Boundary check. */
+	if (offset + length > bp->bio_length)
+		return (false);
+	return (true);
+}
+
+static int
+nbd_conn_recv_offset_data(struct nbd_conn *nc,
+    struct nbd_structured_reply *reply, struct bio *bp, size_t *offsetp,
+    size_t *lengthp)
+{
+	struct nbd_reply_offset_data reply_offset_data;
+	struct mbuf *m;
+	size_t offset, length;
+	int error;
+
+	CTR3(KTR_NBD, "%s nc=%p cookie=%lu", __func__, nc, reply->cookie);
+	length = sizeof(reply_offset_data);
+	if (__predict_false(*lengthp <= length)) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp,
+		    "%s invalid reply length (%zu <= %zu)", __func__, *lengthp,
+		    length);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		return (EIO);
+	}
+	error = nbd_conn_recv_mbufs(nc, length, &m);
+	if (__predict_false(error != 0))
+		return (error);
+	m_copydata(m, 0, length, (void *)&reply_offset_data);
+	m_freem(m);
+	nbd_reply_offset_data_ntoh(&reply_offset_data);
+	offset = reply_offset_data.offset - bp->bio_offset;
+	length = *lengthp - length;
+	if (__predict_false(!bio_range_valid(bp, offset, length))) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s offset data out of bounds",
+		    __func__);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		return (EIO);
+	}
+	*offsetp = offset;
+	*lengthp = length;
+	/* The payload will be received in common BIO_READ code below. */
+	return (0);
+}
+
+static inline void
+nbd_reply_offset_hole_ntoh(struct nbd_reply_offset_hole *reply_offset_hole)
+{
+	reply_offset_hole->offset = be64toh(reply_offset_hole->offset);
+	reply_offset_hole->size = be32toh(reply_offset_hole->size);
+}
+
+static void
+nbd_conn_recv_offset_hole(struct nbd_conn *nc,
+    struct nbd_structured_reply *reply, struct bio *bp)
+{
+	struct nbd_reply_offset_hole reply_offset_hole;
+	struct mbuf *m;
+	size_t offset, length;
+	int error;
+
+	CTR4(KTR_NBD, "%s nc=%p cookie=%lu bp=%p", __func__, nc, reply->cookie,
+	    bp);
+	length = sizeof(reply_offset_hole);
+	if (__predict_false(reply->length < length)) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp,
+		    "%s invalid reply length (%u < %zu)", __func__,
+		    reply->length, length);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		nbd_conn_drop_inflight_structured_reply(nc, bp, reply, EIO);
+		return;
+	}
+	error = nbd_conn_recv_mbufs(nc, length, &m);
+	if (__predict_false(error != 0)) {
+		nbd_conn_drop_inflight_structured_reply(nc, bp, reply, error);
+		return;
+	}
+	m_copydata(m, 0, length, (void *)&reply_offset_hole);
+	m_freem(m);
+	nbd_reply_offset_hole_ntoh(&reply_offset_hole);
+	offset = reply_offset_hole.offset - bp->bio_offset;
+	length = reply_offset_hole.size;
+	if (__predict_false(!bio_range_valid(bp, offset, length))) {
+		G_NBD_LOGREQ(G_NBD_ERROR, bp, "%s offset hole out of bounds",
+		    __func__);
+		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+		nbd_conn_drop_inflight_structured_reply(nc, bp, reply, EIO);
+		return;
+	}
+	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
+		vm_offset_t vaddr;
+		size_t page_offset = (bp->bio_ma_offset + offset) % PAGE_SIZE;
+		size_t resid = length;
+		size_t off = 0;
+		size_t len;
+
+		CTR3(KTR_NBD, "%s nc=%p cookie=%lu unmapped read hole",
+		    __func__, nc, nbd_inflight_get_cookie(bp));
+		for (int i = OFF_TO_IDX(off + page_offset); resid > 0; i++) {
+			len = MIN(resid, PAGE_SIZE - page_offset);
+			MPASS(i < bp->bio_ma_n);
+			vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(bp->bio_ma[i]));
+			memset((char *)vaddr + page_offset, 0, len);
+			page_offset = 0;
+			off += len;
+			resid -= len;
+		}
+	} else {
+		CTR3(KTR_NBD, "%s nc=%p cookie=%lu mapped read hole",
+		    __func__, nc, nbd_inflight_get_cookie(bp));
+		memset(bp->bio_data + offset, 0, length);
+	}
+	bp->bio_completed += length;
+	bp->bio_resid -= length;
+	if (nbd_structured_reply_done(reply))
+		nbd_inflight_deliver(bp, 0);
+}
+
+static inline void
+nbd_conn_drop_inflight_reply(struct nbd_conn *nc, struct bio *bp,
+    union nbd_reply *reply, int error)
+{
+	if (!nbd_reply_done(reply))
+		nbd_conn_remove_inflight_specific(nc, bp);
+	nbd_inflight_deliver(bp, error);
+}
+
 static void
 nbd_conn_recv(struct nbd_conn *nc)
 {
-	/* TODO: structured replies if negotiated */
-	struct nbd_simple_reply reply;
+	union nbd_reply reply;
 	struct mbuf *m;
 	struct bio *bp;
+	size_t offset, length;
 	int error;
 
 	CTR2(KTR_NBD, "%s nc=%p", __func__, nc);
-	error = nbd_conn_recv_mbufs(nc, sizeof(reply), &m);
+	error = nbd_conn_recv_mbufs(nc, sizeof(reply.magic), &m);
 	if (__predict_false(error != 0))
 		return;
 	CTR2(KTR_NBD, "%s nc=%p received reply", __func__, nc);
-	m_copydata(m, 0, sizeof(reply), (void *)&reply);
+	m_copydata(m, 0, sizeof(reply.magic), (void *)&reply.magic);
 	m_freem(m);
-	nbd_simple_reply_ntoh(&reply);
-	if (__predict_false(!nbd_simple_reply_is_valid(&reply))) {
+	nbd_reply_magic_ntoh(&reply.magic);
+	switch (reply.magic) {
+	case NBD_SIMPLE_REPLY_MAGIC:
+		length = sizeof(reply.simple) - sizeof(reply.magic);
+		break;
+	case NBD_STRUCTURED_REPLY_MAGIC:
+		length = sizeof(reply.structured) - sizeof(reply.magic);
+		break;
+	default:
 		G_NBD_LOG(G_NBD_ERROR, "%s received invalid reply", __func__);
 		nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 		return;
 	}
-	/* TODO: structured replies can have multiple replies per cookie */
-	bp = nbd_conn_remove_inflight(nc, reply.cookie);
+	error = nbd_conn_recv_mbufs(nc, length, &m);
+	if (__predict_false(error != 0))
+		return;
+	m_copydata(m, 0, length, (void *)(&reply.magic + 1));
+	m_freem(m);
+	nbd_reply_ntoh(&reply);
+	if (nbd_reply_done(&reply))
+		bp = nbd_conn_remove_inflight(nc, reply.simple.cookie);
+	else
+		bp = nbd_conn_find_inflight(nc, reply.structured.cookie);
 	if (__predict_false(bp == NULL)) {
 		G_NBD_LOG(G_NBD_ERROR,
 		    "%s did not find inflight bio for cookie %lu", __func__,
-		    reply.cookie);
+		    reply.simple.cookie);
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 		return;
 	}
-	if (__predict_false(reply.error != 0)) {
-		G_NBD_LOGREQ(G_NBD_WARN, bp,
-		    "%s received reply with error (%d)", __func__, reply.error);
-		if (reply.error == NBD_ESHUTDOWN)
-			nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
-		nbd_inflight_deliver(bp, nbd_error_to_errno(reply.error));
-		return;
+	if (reply.magic == NBD_STRUCTURED_REPLY_MAGIC) {
+		size_t limit;
+
+		/*
+		 * Structured replies contain offsets and/or lengths which must
+		 * be validated before use for memory access.
+		 *
+		 * XXX: We enforce a hard limit on length here, but should this
+		 * only be enforced at a finer granularity for each reply type?
+		 */
+		length = reply.structured.length;
+		limit = sizeof(struct nbd_reply_offset_data) +
+		    nc->nc_softc->sc_maxpayload;
+		if (__predict_false(length > limit)) {
+			G_NBD_LOGREQ(G_NBD_ERROR, bp,
+			    "%s invalid structured reply length (%zu > %zu)",
+			    __func__, length, limit);
+			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+			nbd_conn_drop_inflight_reply(nc, bp, &reply, EIO);
+			return;
+		}
+		if (__predict_false(
+		    nbd_structured_reply_error(&reply.structured))) {
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
+			    "%s received structured reply with error",
+			    __func__);
+			nbd_conn_recv_error(nc, &reply.structured, bp);
+			return;
+		}
+		switch (reply.structured.type) {
+		case NBD_REPLY_TYPE_NONE:
+			if (__predict_true(length == 0))
+				break;
+			G_NBD_LOGREQ(G_NBD_ERROR, bp,
+			    "%s invalid structured reply length (%zu != 0)",
+			    __func__, length);
+			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+			nbd_conn_drop_inflight_reply(nc, bp, &reply, EIO);
+			return;
+		case NBD_REPLY_TYPE_OFFSET_DATA:
+			error = nbd_conn_recv_offset_data(nc, &reply.structured,
+			    bp, &offset, &length);
+			if (__predict_false(error != 0)) {
+				nbd_conn_drop_inflight_reply(nc, bp, &reply,
+				    error);
+				return;
+			}
+			break;
+		case NBD_REPLY_TYPE_OFFSET_HOLE:
+			nbd_conn_recv_offset_hole(nc, &reply.structured, bp);
+			return;
+		default:
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
+			    "%s unhandled structured reply type (%hu)",
+			    __func__, reply.structured.type);
+			/* Stay connected, but drop the inflight bio. */
+			nbd_conn_drop_inflight_reply(nc, bp, &reply, EIO);
+			return;
+		}
+		/* Header data has been subtracted from length at this point. */
+		if (__predict_false(length > bp->bio_resid)) {
+			G_NBD_LOGREQ(G_NBD_ERROR, bp,
+			    "%s invalid structured reply length (%zu > %lu)",
+			    __func__, length, bp->bio_resid);
+			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
+			nbd_conn_drop_inflight_reply(nc, bp, &reply, EIO);
+			return;
+		}
+	} else {
+		if (__predict_false(reply.simple.error != 0)) {
+			G_NBD_LOGREQ(G_NBD_WARN, bp,
+			    "%s received reply with error (%d)", __func__,
+			    reply.simple.error);
+			if (reply.simple.error == NBD_ESHUTDOWN)
+				nbd_conn_degrade_state(nc,
+				    NBD_CONN_SOFT_DISCONNECTING);
+			nbd_inflight_deliver(bp,
+			    nbd_error_to_errno(reply.simple.error));
+			return;
+		}
+		offset = 0;
+		length = bp->bio_length;
 	}
 	/* TODO: see comment above soreceive in nbd_conn_recv_mbufs */
 	if (bp->bio_cmd == BIO_READ) {
-		size_t offset = 0;
-		size_t resid = bp->bio_length;
+		size_t resid = length;
 
 		/* Perform the read in batches to limit the memory usage. */
 		while (resid > 0) {
@@ -920,7 +1311,8 @@ nbd_conn_recv(struct nbd_conn *nc)
 			}
 			error = nbd_conn_recv_mbufs(nc, len, &m);
 			if (__predict_false(error != 0)) {
-				nbd_inflight_deliver(bp, error);
+				nbd_conn_drop_inflight_reply(nc, bp, &reply,
+				    error);
 				return;
 			}
 			CTR3(KTR_NBD, "%s nc=%p cookie=%lu received read data",
@@ -960,9 +1352,10 @@ nbd_conn_recv(struct nbd_conn *nc)
 			resid -= len;
 		}
 	}
-	bp->bio_completed = bp->bio_length;
-	bp->bio_resid = 0;
-	nbd_inflight_deliver(bp, 0);
+	bp->bio_completed += length;
+	bp->bio_resid -= length;
+	if (nbd_reply_done(&reply))
+		nbd_inflight_deliver(bp, 0);
 }
 
 static void
@@ -1479,8 +1872,9 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	} *flagsp;
 	uint32_t *minbsp, *prefbsp, *maxpayloadp;
 	uint32_t minbs, prefbs, maxpl;
+	int *simplep;
 	bool *tlsp;
-	bool tls;
+	bool tls, simple;
 	struct socket **sockets;
 	struct g_geom *gp;
 	struct g_provider *pp;
@@ -1545,6 +1939,14 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		   "module loaded");
 		return;
 	}
+	simplep = gctl_get_paraml(req, "simple", sizeof(*simplep));
+	if (simplep == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'simple' argument.");
+		return;
+	}
+	simple = *simplep != 0;
 	minbsp = gctl_get_paraml(req, "minimum_blocksize", sizeof(*minbsp));
 	if (minbsp == NULL) {
 		g_destroy_geom(gp);
@@ -1604,8 +2006,8 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		    sendspace, sbsize);
 		sendspace = sbsize;
 	}
-	/* TODO: support structured replies */
-	minspace = sizeof(struct nbd_simple_reply) + minbs;
+	minspace = sizeof(struct nbd_structured_reply) +
+	    sizeof(struct nbd_reply_offset_data) + minbs;
 	if (recvspace < minspace) {
 		G_NBD_LOG(G_NBD_WARN, "kern.geom.nbd.recvspace %lu -> %lu",
 		    recvspace, minspace);
@@ -1659,6 +2061,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	sc->sc_maxpayload = maxpl;
 	sc->sc_unit = unit;
 	sc->sc_tls = tls;
+	sc->sc_simple = simple;
 	sc->sc_geom = gp;
 	sc->sc_nconns = nsockets;
 	bio_queue_init(&sc->sc_queue);
@@ -2257,6 +2660,8 @@ g_nbd_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 	sbuf_printf(sb, "%s<MaximumPayload>%u</MaximumPayload>\n", indent,
 	    sc->sc_maxpayload);
 	sbuf_printf(sb, "%s<TLS>%s</TLS>\n", indent, sc->sc_tls ? "yes" : "no");
+	sbuf_printf(sb, "%s<Simple>%s</Simple>\n", indent,
+	    sc->sc_simple ? "yes" : "no");
 	sbuf_printf(sb, "%s<Connections>%u</Connections>\n", indent,
 	    sc->sc_nconns);
 	sbuf_printf(sb, "%s<ActiveConnections>%u</ActiveConnections>\n", indent,
