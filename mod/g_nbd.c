@@ -545,6 +545,13 @@ nbd_write_mbufs(struct bio *bp, bool tls, size_t limit, size_t *offset)
 	return (m);
 }
 
+static inline void
+nbd_conn_drop_inflight(struct nbd_conn *nc, struct bio *bp, int error)
+{
+	nbd_conn_remove_inflight_specific(nc, bp);
+	nbd_inflight_deliver(bp, error);
+}
+
 static void
 nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 {
@@ -565,8 +572,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	m = nbd_request_mbuf(tls, &req);
 	if (__predict_false(m == NULL)) {
 		counter_u64_add(g_nbd_enomems, 1);
-		nbd_conn_remove_inflight_specific(nc, bp);
-		nbd_inflight_deliver(bp, ENOMEM);
+		nbd_conn_drop_inflight(nc, bp, ENOMEM);
 		return;
 	}
 	req->magic = htobe32(NBD_REQUEST_MAGIC);
@@ -589,8 +595,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 			if (__predict_false(d == NULL)) {
 				m_free(m);
 				counter_u64_add(g_nbd_enomems, 1);
-				nbd_conn_remove_inflight_specific(nc, bp);
-				nbd_inflight_deliver(bp, ENOMEM);
+				nbd_conn_drop_inflight(nc, bp, ENOMEM);
 				return;
 			}
 			if (m == NULL)
@@ -621,8 +626,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 				    NBD_CONN_CONNECTED,
 				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
-				nbd_conn_remove_inflight_specific(nc, bp);
-				nbd_inflight_deliver(bp, EIO);
+				nbd_conn_drop_inflight(nc, bp, EIO);
 				return;
 			}
 			if (sbspace(&so->so_snd) >= needed)
@@ -647,8 +651,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 			nbd_conn_degrade_state(nc, NBD_CONN_HARD_DISCONNECTING);
 			if (error == ENOMEM)
 				counter_u64_add(g_nbd_enomems, 1);
-			nbd_conn_remove_inflight_specific(nc, bp);
-			nbd_inflight_deliver(bp, error);
+			nbd_conn_drop_inflight(nc, bp, error);
 			return;
 		}
 		resid -= needed;
