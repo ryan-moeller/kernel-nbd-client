@@ -1011,7 +1011,7 @@ nbd_conn_soft_disconnect_ok(struct nbd_conn *nc)
 		    so->so_error);
 		return (false);
 	}
-	if (__predict_false((so->so_state & SS_ISCONNECTED) == 0)) {
+	if ((so->so_state & SS_ISCONNECTED) == 0) {
 		CTR2(KTR_NBD, "%s nc=%p socket not connected", __func__, nc);
 		return (false);
 	}
