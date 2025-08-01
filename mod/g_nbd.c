@@ -622,7 +622,7 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
 				nbd_conn_remove_inflight_specific(nc, bp);
-				nbd_inflight_deliver(bp, ENXIO);
+				nbd_inflight_deliver(bp, EIO);
 				return;
 			}
 			if (sbspace(&so->so_snd) >= needed)
@@ -770,7 +770,7 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 				nbd_conn_degrade_state(nc,
 				    NBD_CONN_HARD_DISCONNECTING);
 				m_freem(m);
-				return (ENXIO);
+				return (EIO);
 			}
 			available = sbavail(&so->so_rcv);
 			if (available >= len)
@@ -831,8 +831,19 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			    __func__, error);
 			nbd_conn_degrade_state(nc,
 			    NBD_CONN_HARD_DISCONNECTING);
-			if (error == ENOMEM)
+			switch (error) {
+			case ENOMEM:
 				counter_u64_add(g_nbd_enomems, 1);
+				break;
+			case ENXIO:
+				/*
+				 * Translate the error for an alert record into
+				 * something more appropriate.  The device still
+				 * exists, but this connection is failing.
+				 */
+				error = ECONNRESET;
+				break;
+			}
 			m_freem(m);
 			return (error);
 		}
