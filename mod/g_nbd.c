@@ -343,7 +343,7 @@ nbd_conn_state_str(enum nbd_conn_state state)
 	CASE_STR(NBD_CONN_HARD_DISCONNECTING);
 	CASE_STR(NBD_CONN_CLOSED);
 #undef CASE_STR
-	default: return "[unknown]";
+	default: return ("[unknown]");
 	}
 }
 #endif
