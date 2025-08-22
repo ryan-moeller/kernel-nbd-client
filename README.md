@@ -36,6 +36,9 @@ kern.ipc.tls.enable: 0 -> 1
 
 ktls(4) is enabled by default on 15.0-CURRENT.
 
+Only architectures with a direct map of physical memory are supported at this
+time.  This currently includes amd64, arm64, and (usually) powerpc64.
+
 ## Building and Installing
 
 Build and install for a production kernel:
