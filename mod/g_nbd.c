@@ -846,7 +846,12 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 			    (so->so_rcv.sb_mbtail->m_flags & M_EOR) != 0)
 				break;
 			so->so_rcv.sb_lowat = MIN(len, so->so_rcv.sb_hiwat);
+			CTR6(KTR_NBD,
+			    "%s so=%p waiting available=%d space=%d len=%zu lowat=%d",
+			    __func__, so, available, sbspace(&so->so_rcv), len,
+			    so->so_rcv.sb_lowat);
 			cv_wait(&nc->nc_receive_cv, SOCK_RECVBUF_MTX(so));
+			CTR2(KTR_NBD, "%s so=%p awoke", __func__, so);
 			so->so_rcv.sb_lowat = so->so_rcv.sb_hiwat + 1;
 		}
 		SOCK_RECVBUF_UNLOCK(so);
@@ -1680,6 +1685,8 @@ nbd_conn_soupcall_snd(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
+	CTR3(KTR_NBD, "%s so=%p%s writeable", __func__, so,
+	    sowriteable(so) ? "" : " not");
 	if (sowriteable(so))
 		cv_signal(&nc->nc_send_cv);
 	return (SU_OK);
@@ -1690,6 +1697,9 @@ nbd_conn_soupcall_rcv(struct socket *so, void *arg, int waitflag __unused)
 {
 	struct nbd_conn *nc = arg;
 
+	CTR6(KTR_NBD, "%s so=%p%s readable avail=%d space=%d lowat=%d",
+	    __func__, so, soreadabledata(so) ? "" : " not",
+	    sbavail(&so->so_rcv), sbspace(&so->so_rcv), so->so_rcv.sb_lowat);
 	if (soreadabledata(so))
 		cv_signal(&nc->nc_receive_cv);
 	/*
