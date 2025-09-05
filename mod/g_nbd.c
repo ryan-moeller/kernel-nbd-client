@@ -1644,6 +1644,9 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		free_unr(g_nbd_unit, unit);
 		return;
 	}
+	/* Hide the irrelevant port for Unix-domain sockets. */
+	if (sockets[0]->so_proto->pr_domain->dom_family == AF_LOCAL)
+		port = "";
 	sc = g_malloc(sizeof(*sc), M_WAITOK | M_ZERO);
 	sc->sc_host = strdup(host, M_GEOM);
 	sc->sc_port = strdup(port, M_GEOM);
