@@ -1275,7 +1275,7 @@ nbd_conn_receiver(void *arg)
 	    !TAILQ_EMPTY_ATOMIC(&nc->nc_inflight))
 		nbd_conn_recv(nc);
 	atomic_store_int(&nc->nc_state, NBD_CONN_HARD_DISCONNECTING);
-	socantsendmore(so);
+	soshutdown(so, SHUT_WR);
 	cv_signal(&nc->nc_send_cv);
 	wakeup(&sc->sc_queue);
 	sema_post(&nc->nc_receiver_done);
