@@ -228,7 +228,7 @@ nbd_client_tls_init(struct nbd_client *client)
 #endif
 
 static int
-nbd_client_connect(struct nbd_client *client)
+nbd_client_connect(struct nbd_client *client, bool noretry)
 {
 	struct addrinfo hints, *first_ai, *ai;
 	struct gctl_req *req = client->req;
@@ -241,8 +241,9 @@ nbd_client_connect(struct nbd_client *client)
 	hints.ai_protocol = IPPROTO_TCP;
 	error = getaddrinfo(client->host, client->port, &hints, &first_ai);
 	if (error != 0) {
-		gctl_error(req, "Failed to locate server (%s:%s): %s",
-		    client->host, client->port, gai_strerror(error));
+		if (noretry)
+			gctl_error(req, "Failed to locate server (%s:%s): %s",
+			    client->host, client->port, gai_strerror(error));
 		return (-1);
 	}
 	on = 1;
@@ -277,8 +278,9 @@ close:
 	}
 	if (s == -1) {
 		freeaddrinfo(first_ai);
-		gctl_error(req, "Failed to create socket: %s: %s",
-		    what, strerror(error));
+		if (noretry)
+			gctl_error(req, "Failed to create socket: %s: %s",
+			    what, strerror(error));
 		return (-1);
 	}
 	client->socket = s;
@@ -767,6 +769,7 @@ make_connections(struct nbd_client *client, struct gctl_req *req, int nsockets,
 {
 	struct rlimit nofile;
 	int *sockets;
+	bool noretry = delay <= 0;
 
 	if (getrlimit(RLIMIT_NOFILE, &nofile) != 0) {
 		gctl_error(req, "Failed to get resource limits.");
@@ -781,8 +784,8 @@ make_connections(struct nbd_client *client, struct gctl_req *req, int nsockets,
 	sockets = malloc(sizeof(*sockets) * nsockets);
 	assert(sockets != NULL); /* can't do much if ENOMEM */
 	for (int i = 0; i < nsockets; i++) {
-		while (nbd_client_connect(client) != 0) {
-			if (delay <= 0) {
+		while (nbd_client_connect(client, noretry) != 0) {
+			if (noretry) {
 				while (i > 0)
 					close(sockets[--i]);
 				free(sockets);
@@ -1056,7 +1059,7 @@ nbd_list(struct gctl_req *req, unsigned flags)
 	if (nbd_client_tls_init(&client) != 0)
 		return;
 #endif
-	if (nbd_client_connect(&client) != 0)
+	if (nbd_client_connect(&client, true) != 0)
 		return;
 	if (nbd_client_list(&client, list_callback, NULL) != 0)
 		return;
