@@ -197,6 +197,8 @@ bio_cmd_str(struct bio *bp)
 	}
 }
 
+#define QUEUE_COOKIE (-1ULL)
+
 static inline void
 nbd_inflight_set_cookie(struct bio *bp, uint64_t cookie)
 {
@@ -244,16 +246,6 @@ nbd_inflight_free_mext(struct mbuf *m)
 
 	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
 	nbd_inflight_deliver(bp, 0);
-}
-
-static inline void
-nbd_inflight_cancel(struct bio *bp)
-{
-	bool last __diagused;
-
-	CTR2(KTR_NBD, "%s cookie=%lu", __func__, nbd_inflight_get_cookie(bp));
-	last = nbd_inflight_release(bp);
-	KASSERT(last, ("inflight bio %p still referenced", bp));
 }
 
 static inline void
@@ -305,10 +297,11 @@ nbd_conn_enqueue_inflight(struct nbd_conn *nc, struct bio *bp)
 	CTR4(KTR_NBD, "%s nc=%p bp=%p cookie=%lu", __func__, nc, bp,
 	    nc->nc_seq);
 	nbd_inflight_set_cookie(bp, nc->nc_seq++);
-	nbd_inflight_set_refs(bp, 1);
 	mtx_lock(&nc->nc_inflight_mtx);
 	bio_queue_insert_tail(&nc->nc_inflight, bp);
 	mtx_unlock(&nc->nc_inflight_mtx);
+	if (__predict_false(nc->nc_seq == QUEUE_COOKIE))
+		++nc->nc_seq;
 }
 
 static void
@@ -1098,7 +1091,7 @@ nbd_conn_drain_inflight(struct nbd_conn *nc)
 	 */
 	mtx_lock(&nc->nc_inflight_mtx);
 	TAILQ_FOREACH(bp, &nc->nc_inflight, bio_queue) {
-		nbd_inflight_cancel(bp);
+		nbd_inflight_set_cookie(bp, QUEUE_COOKIE);
 		/*
 		 * FIXME: This is incorrect, yet necessary for now.
 		 * Need a way to reissue the flush in the correct position in
@@ -1792,7 +1785,7 @@ g_nbd_drain_queue(struct g_nbd_softc *sc)
 	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
 	mtx_lock(&sc->sc_queue_mtx);
 	while ((bp = bio_queue_takefirst(&sc->sc_queue)) != NULL)
-		g_io_deliver(bp, ENXIO);
+		nbd_inflight_deliver(bp, ENXIO);
 	mtx_unlock(&sc->sc_queue_mtx);
 }
 
@@ -1960,6 +1953,8 @@ g_nbd_issue(struct g_nbd_softc *sc, struct bio *bp)
 {
 	bool first;
 
+	nbd_inflight_set_cookie(bp, QUEUE_COOKIE);
+	nbd_inflight_set_refs(bp, 1);
 	mtx_lock(&sc->sc_queue_mtx);
 	first = bio_queue_empty(&sc->sc_queue);
 	bio_queue_insert_tail(&sc->sc_queue, bp);
