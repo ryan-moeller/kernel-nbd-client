@@ -805,6 +805,27 @@ make_connections(struct nbd_client *client, struct gctl_req *req, int nsockets,
 	return (sockets);
 }
 
+static int
+issue(struct gctl_req *req)
+{
+	const char *errstr;
+
+	errstr = gctl_issue(req);
+	if (errstr != NULL) {
+		/*
+		 * XXX: Work around gctl_issue() setting req->error to an empty
+		 * string and req->nerror to 0 while returning an actual error
+		 * string for errno.
+		 */
+		if (req->error != NULL && req->error[0] == '\0') {
+			req->nerror = errno;
+			strlcpy(req->error, errstr, req->lerror + 1);
+		}
+		return (-1);
+	}
+	return (0);
+}
+
 /*
  * TODO: verbose output
  */
@@ -862,7 +883,8 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 	gctl_ro_param(req, "maximum_payload", sizeof(client.maximum_payload),
 	    &client.maximum_payload);
 	gctl_rw_param(req, "provider", sizeof(provider), provider);
-	gctl_issue(req);
+	if (issue(req) != 0)
+		goto close;
 	provider[sizeof(provider) - 1] = '\0';
 	puts(provider);
 close:
@@ -1199,7 +1221,7 @@ scale_common(struct gctl_req *req, bool reconnect)
 		}
 		if (nconns <= nactive) {
 			/* No new connections needed. */
-			gctl_issue(req);
+			issue(req);
 			goto free;
 		}
 		tflags = find_config(gp, "TransmissionFlags");
@@ -1261,7 +1283,7 @@ scale_common(struct gctl_req *req, bool reconnect)
 	if (sockets == NULL)
 		goto free;
 	gctl_ro_param(req, "nsockets", sizeof(nsockets), &nsockets);
-	gctl_issue(req);
+	issue(req);
 	for (int i = 0; i < nsockets; i++)
 		close(sockets[i]); /* the kernel keeps its own ref */
 free:
