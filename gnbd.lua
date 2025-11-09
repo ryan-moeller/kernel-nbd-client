@@ -13,10 +13,13 @@
 -- Or what can be useful while editing this script in (neo)vim:
 -- :!lldb -b -o "script -l lua -- dofile '%:p'" -c /dev/mem /boot/kernel/kernel
 
--- LLDB does this automatically in the REPL
+-- LLDB does this automatically in ScriptInterpreterLua::EnterSession() for
+-- interactive REPL sessions.
 lldb.debugger = lldb.SBDebugger.FindDebuggerWithID(1)
 lldb.target = lldb.debugger:GetSelectedTarget()
 lldb.process = lldb.target:GetProcess()
+lldb.thread = lldb.process:GetSelectedThread()
+lldb.frame = lldb.thread:GetSelectedFrame()
 
 function error_str(value)
 	local errno = (type(value) == "number") and value or value:GetValueAsSigned()
