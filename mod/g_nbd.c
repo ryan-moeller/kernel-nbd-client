@@ -572,8 +572,14 @@ nbd_conn_send(struct nbd_conn *nc, struct bio *bp)
 	req->flags = htobe16(flags);
 	req->command = htobe16(cmd);
 	req->cookie = htobe64(nbd_inflight_get_cookie(bp));
-	req->offset = htobe64(bp->bio_offset);
-	req->length = htobe32(bp->bio_length);
+	if (cmd == NBD_CMD_FLUSH) {
+		/* reserved; MUST be zero */
+		req->offset = 0;
+		req->length = 0;
+	} else {
+		req->offset = htobe64(bp->bio_offset);
+		req->length = htobe32(bp->bio_length);
+	}
 	needed = resid = sizeof(*req);
 	if (cmd == NBD_CMD_WRITE)
 		resid += bp->bio_length;
