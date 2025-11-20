@@ -24,6 +24,9 @@ task:
     - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
+    # make install started failing with this missing in 15.0
+    # Maybe earlier GCE images came with base-dbg but it was removed?
+    - mkdir -p /usr/lib/debug/boot/modules
     # Check for WITNESS and INVARIANTS and add args for make when present.
     - sysctl -n kern.conftxt | awk '
         /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
