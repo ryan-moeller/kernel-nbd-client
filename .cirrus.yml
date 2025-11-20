@@ -22,19 +22,20 @@ task:
     WD: /tmp/wd
     PATH: /usr/local/sbin:${PATH}
     ARCHIVES_BASE: https://download.freebsd.org/${CIRRUS_TASK_NAME}
+  env_setup_script:
+    # Check for WITNESS and INVARIANTS and add args for make when present.
+    - sysctl -n kern.conftxt | awk '
+        /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
+        END { print "DEBUG_FLAGS=-g -O0" opts }
+      ' | tee -a ${CIRRUS_ENV} >&2
   build_setup_script:
-    - mkdir ${WD}
     - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
     # make install started failing with this missing in 15.0
     # Maybe earlier GCE images came with base-dbg but it was removed?
     - mkdir -p /usr/lib/debug/boot/modules
-    # Check for WITNESS and INVARIANTS and add args for make when present.
-    - sysctl -n kern.conftxt | awk '
-        /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
-        END { print "DEBUG_FLAGS=-g -O0" opts }
-      ' | tee -a ${CIRRUS_ENV} >&2
+    - mkdir ${WD}
   build_script:
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" install
@@ -184,6 +185,113 @@ task:
     - gnbd disconnect ${NBD}
     # Unset the NBD variable in the env.
     - sed -i '' -e '/^NBD=/d' ${CIRRUS_ENV}
+  debug_script:
+    - dmesg >&2
+    - vmstat -z >&2
+    - vmstat -m >&2
+
+task:
+  matrix:
+    # No motivation to backport module to 13.5
+    - name: trace/releases/amd64/14.3-RELEASE
+      depends_on: releases/amd64/14.3-RELEASE
+      freebsd_instance:
+        image_family: freebsd-14-3
+    - name: trace/releases/amd64/15.0-RC2
+      depends_on: releases/amd64/15.0-RC2
+      freebsd_instance:
+        image_family: freebsd-15-0-amd64-ufs
+  stateful: false
+  env:
+    WD: /tmp/wd
+    PATH: /usr/local/sbin:${PATH}
+  env_setup_script:
+    - echo ARCHIVES_BASE=https://download.freebsd.org/${CIRRUS_TASK_NAME#trace/}
+      >> ${CIRRUS_ENV}
+    # Check for WITNESS and INVARIANTS and add args for make when present.
+    - sysctl -n kern.conftxt | awk '
+        /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
+        END { print "DEBUG_FLAGS=-g -O0" opts }
+      ' | tee -a ${CIRRUS_ENV} >&2
+  build_setup_script:
+    - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
+    - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
+    - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
+    # make install started failing with this missing in 15.0
+    # Maybe earlier GCE images came with base-dbg but it was removed?
+    - mkdir -p /usr/lib/debug/boot/modules
+    - mkdir ${WD}
+  build_script:
+    - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
+    - make DEBUG_FLAGS="${DEBUG_FLAGS}" install
+  messages_background_script:
+    - tail -F -n +1 /var/log/messages
+  load_script:
+    - gnbd load
+    - sysctl kern.geom.nbd.debug=1
+    - sysctl kern.ipc.tls.enable=1
+    # Avoid IP queue drops.
+    - sysctl net.inet.ip.intr_queue_maxlen=`sysctl -n net.isr.maxqlimit`
+  ca_info_file:
+    path: ${WD}/ca.info
+    from_contents: |
+      cn = testing nbd client
+      ca
+      cert_signing_key
+  server_info_file:
+    path: ${WD}/server.info
+    from_contents: |
+      organization = testing nbd client
+      cn = localhost
+      tls_www_server
+      encryption_key
+      signing_key
+  client_info_file:
+    path: ${WD}/client.info
+    from_contents: |
+      country = US
+      state = Florida
+      locality = Orlando
+      organization = testing nbd client
+      cn = localhost
+      tls_www_client
+      encryption_key
+      signing_key
+  test_setup_script:
+    - pkg install -y
+      isal-kmod
+      gnutls
+      nbdkit
+    # Certificate Authority
+    - certtool --generate-privkey > ${WD}/ca-key.pem
+    - certtool --generate-self-signed
+      --load-privkey ${WD}/ca-key.pem
+      --template ${WD}/ca.info
+      --outfile ${WD}/ca-cert.pem
+    # Server
+    - certtool --generate-privkey > ${WD}/server-key.pem
+    - certtool --generate-certificate
+      --load-ca-certificate ${WD}/ca-cert.pem
+      --load-ca-privkey ${WD}/ca-key.pem
+      --load-privkey ${WD}/server-key.pem
+      --template ${WD}/server.info
+      --outfile ${WD}/server-cert.pem
+    # Client
+    - certtool --generate-privkey > ${WD}/client-key.pem
+    - certtool --generate-certificate
+      --load-ca-certificate ${WD}/ca-cert.pem
+      --load-ca-privkey ${WD}/ca-key.pem
+      --load-privkey ${WD}/client-key.pem
+      --template ${WD}/client.info
+      --outfile ${WD}/client-cert.pem
+    # Intelligent Storage Acceleration Library - faster ktls crypto routines
+    - kldload isal
+  test_server_background_script:
+    - nbdkit
+      --no-fork
+      --threads ${CIRRUS_CPU}
+      --tls-certificates ${WD}
+      memory 4G
   trace_setup_script:
     - pkg install -y fio flamegraph
     - mkdir traces
