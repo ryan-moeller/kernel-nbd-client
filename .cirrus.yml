@@ -21,12 +21,9 @@ task:
     ARCHIVES_BASE: https://download.freebsd.org/${CIRRUS_TASK_NAME}
   build_setup_script:
     - mkdir ${WD}
-    - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel.txz
-    - tar xf ${WD}/kernel.txz -C / && rm ${WD}/kernel.txz
-    - cd ${WD} && fetch -q ${ARCHIVES_BASE}/kernel-dbg.txz
-    - tar xf ${WD}/kernel-dbg.txz -C / && rm ${WD}/kernel-dbg.txz
-    - cd ${WD} && fetch -q ${ARCHIVES_BASE}/src.txz
-    - tar xf ${WD}/src.txz -C / && rm ${WD}/src.txz
+    - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
+    - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
+    - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
     # Check for WITNESS and INVARIANTS and add args for make when present.
     - sysctl -n kern.conftxt | awk '
         /^options\t(WITNESS|INVARIANTS)$/ { opts = opts " -D" $2 }
