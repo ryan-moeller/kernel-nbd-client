@@ -248,6 +248,13 @@ nbd_client_connect(struct nbd_client *client, bool noretry)
 	}
 	on = 1;
 	for (ai = first_ai; ai != NULL; ai = ai->ai_next) {
+#if __FreeBSD_version >= 1500000
+		if (ai->ai_family == AF_UNIX) {
+			what = "UNIX-domain sockets cannot be used as of 15.0";
+			error = ENOTSUP;
+			continue;
+		}
+#endif
 		s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (s == -1) {
 			what = "socket";

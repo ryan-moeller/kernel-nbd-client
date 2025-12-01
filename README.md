@@ -156,6 +156,8 @@ Connect using a UNIX-domain socket:
 # gnbd connect /path/to/server.socket
 nbd3
 ```
+Note: FreeBSD no longer provides adequate support for UNIX-domain sockets as of
+version 15.0, so this feature is only enabled on earlier versions of FreeBSD.
 
 Scale a device using TLS:
 
