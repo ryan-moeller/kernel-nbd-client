@@ -32,9 +32,6 @@ task:
     - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
-    # make install started failing with this missing in 15.0
-    # Maybe earlier GCE images came with base-dbg but it was removed?
-    - mkdir -p /usr/lib/debug/boot/modules
     - mkdir ${WD}
   build_script:
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
@@ -217,9 +214,6 @@ task:
     - fetch -o - ${ARCHIVES_BASE}/kernel.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/kernel-dbg.txz | tar x -C /
     - fetch -o - ${ARCHIVES_BASE}/src.txz | tar x -C /
-    # make install started failing with this missing in 15.0
-    # Maybe earlier GCE images came with base-dbg but it was removed?
-    - mkdir -p /usr/lib/debug/boot/modules
     - mkdir ${WD}
   build_script:
     - make DEBUG_FLAGS="${DEBUG_FLAGS}" -j${CIRRUS_CPU}
