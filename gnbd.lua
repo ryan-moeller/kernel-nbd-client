@@ -155,13 +155,12 @@ function iter_connections(sc)
 	local head = sc:GetChildMemberWithName("sc_connections")
 	local nc = head:GetChildMemberWithName("slh_first")
 	return function ()
-		while nc:GetValueAsSigned() ~= 0 do
+		if nc:GetValueAsUnsigned() ~= 0 then
 			local link = nc:GetChildMemberWithName("nc_connections")
 			local current = nc
 			nc = link:GetChildMemberWithName("sle_next")
 			return current
 		end
-		return nil
 	end
 end
 
@@ -169,13 +168,12 @@ function iter_inflight(nc)
 	local head = nc:GetChildMemberWithName("nc_inflight")
 	local bp = head:GetChildMemberWithName("tqh_first")
 	return function ()
-		while bp:GetValueAsSigned() ~= 0 do
+		if bp:GetValueAsUnsigned() ~= 0 then
 			local link = bp:GetChildMemberWithName("bio_queue")
 			local current = bp
 			bp = link:GetChildMemberWithName("tqe_next")
 			return current
 		end
-		return nil
 	end
 end
 
