@@ -5,15 +5,10 @@ freebsd_instance:
 task:
   matrix:
     # No motivation to backport module to 13.5
-    - name: snapshots/amd64/14.3-STABLE
+    # No support for stable branches in Cirrus
+    - name: releases/amd64/14.4-RELEASE
       freebsd_instance:
-        image_family: freebsd-14-3-snap
-    - name: snapshots/amd64/15.0-STABLE
-      freebsd_instance:
-        image_family: freebsd-15-0-amd64-ufs-snap
-    - name: releases/amd64/14.3-RELEASE
-      freebsd_instance:
-        image_family: freebsd-14-3
+        image_family: freebsd-14-4-amd64-ufs
     - name: releases/amd64/15.0-RELEASE
       freebsd_instance:
         image_family: freebsd-15-0-amd64-ufs
@@ -190,10 +185,10 @@ task:
 task:
   matrix:
     # No motivation to backport module to 13.5
-    - name: trace/releases/amd64/14.3-RELEASE
-      depends_on: releases/amd64/14.3-RELEASE
+    - name: trace/releases/amd64/14.4-RELEASE
+      depends_on: releases/amd64/14.4-RELEASE
       freebsd_instance:
-        image_family: freebsd-14-3
+        image_family: freebsd-14-4-amd64-ufs
     - name: trace/releases/amd64/15.0-RELEASE
       depends_on: releases/amd64/15.0-RELEASE
       freebsd_instance:
