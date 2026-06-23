@@ -864,6 +864,11 @@ nbd_conn_recv_mbufs(struct nbd_conn *nc, size_t len, struct mbuf **mp)
 	return (0);
 }
 
+/* Not in releases yet. */
+#ifndef VM_PAGE_TO_DMAP
+#define	VM_PAGE_TO_DMAP(pg)  (void *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(pg))
+#endif
+
 static void
 nbd_conn_recv(struct nbd_conn *nc)
 {
@@ -926,7 +931,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 			CTR3(KTR_NBD, "%s nc=%p cookie=%lu received read data",
 			    __func__, nc, nbd_inflight_get_cookie(bp));
 			if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
-				vm_offset_t vaddr;
+				char *vaddr;
 				size_t page_offset =
 				    offset == 0 ? bp->bio_ma_offset : 0;
 				size_t offset1 = 0;
@@ -941,11 +946,10 @@ nbd_conn_recv(struct nbd_conn *nc)
 					len1 = MIN(resid1,
 					    PAGE_SIZE - page_offset);
 					MPASS(i < bp->bio_ma_n);
-					vaddr = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(
-					    bp->bio_ma[i]));
+					vaddr = VM_PAGE_TO_DMAP(bp->bio_ma[i]);
 					/* XXX: any way to avoid this copy? */
 					m_copydata(m, offset1, len1,
-					    (char *)vaddr + page_offset);
+					    vaddr + page_offset);
 					page_offset = 0;
 					offset1 += len1;
 					resid1 -= len1;
