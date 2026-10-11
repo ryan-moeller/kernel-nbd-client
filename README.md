@@ -1,5 +1,7 @@
 # FreeBSD GEOM NBD Client
 
+[![FreeBSD 15.1](https://github.com/ryan-moeller/kernel-nbd-client/workflows/FreeBSD%2015.1/badge.svg)](https://github.com/ryan-moeller/kernel-nbd-client/actions/workflows/test.yml)
+
 This is a Network Block Device (NBD) client for the FreeBSD kernel GEOM
 framework.
 

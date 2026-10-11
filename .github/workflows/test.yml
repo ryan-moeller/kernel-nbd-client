@@ -1,0 +1,27 @@
+name: "FreeBSD 15.1"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: test on FreeBSD 15.1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          cache-after-prepare: true
+          prepare: |
+            pkg install -y \
+              FreeBSD-src \
+              FreeBSD-src-sys
+          run: |
+            set -e
+            make
+            make install
+          # TODO: restore tests from Cirrus CI
