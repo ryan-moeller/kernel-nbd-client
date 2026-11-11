@@ -428,21 +428,21 @@ nbd_write_mbufs(struct bio *bp, bool tls, size_t limit, size_t *offset)
 	    nbd_inflight_get_cookie(bp), tls ? "tls" : "notls", limit, start);
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 		struct mbuf *d, *m_tail;
-		size_t page_offset = start == 0 ? bp->bio_ma_offset : 0;
-		size_t resid = bp->bio_length;
+		size_t abs = start + bp->bio_ma_offset;
+		size_t page_offset = abs & PAGE_MASK;
+		size_t resid = bp->bio_length - start;
 		size_t len;
 
 		CTR3(KTR_NBD, "%s cookie=%lu unmapped write (%s)", __func__,
 		    nbd_inflight_get_cookie(bp), tls ? "tls" : "notls");
 		if (resid > limit) {
 			/* Reduce limit to end on a page boundary. */
-			resid = trunc_page(limit - page_offset) + page_offset;
+			resid = trunc_page(page_offset + limit) - page_offset;
 			counter_u64_add(g_nbd_write_truncs, 1);
 		}
 		*offset += resid;
 		m = m_tail = d = NULL;
-		for (int i = OFF_TO_IDX(start + page_offset);
-		    resid > 0; i++) {
+		for (int i = OFF_TO_IDX(abs); resid > 0; i++) {
 			if (d == NULL) {
 				d = mb_alloc_ext_pgs(M_NOWAIT,
 #if __FreeBSD_version > 1500026
@@ -932,8 +932,8 @@ nbd_conn_recv(struct nbd_conn *nc)
 			    __func__, nc, nbd_inflight_get_cookie(bp));
 			if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
 				char *vaddr;
-				size_t page_offset =
-				    offset == 0 ? bp->bio_ma_offset : 0;
+				size_t abs = offset + bp->bio_ma_offset;
+				size_t page_offset = abs & PAGE_MASK;
 				size_t offset1 = 0;
 				size_t resid1 = len;
 				size_t len1;
@@ -941,8 +941,7 @@ nbd_conn_recv(struct nbd_conn *nc)
 				CTR3(KTR_NBD,
 				    "%s nc=%p cookie=%lu unmapped read",
 				    __func__, nc, nbd_inflight_get_cookie(bp));
-				for (int i = OFF_TO_IDX(offset + page_offset);
-				    resid1 > 0; i++) {
+				for (int i = OFF_TO_IDX(abs); resid1 > 0; i++) {
 					len1 = MIN(resid1,
 					    PAGE_SIZE - page_offset);
 					MPASS(i < bp->bio_ma_n);
