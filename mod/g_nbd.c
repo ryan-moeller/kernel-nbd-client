@@ -153,7 +153,7 @@ struct g_nbd_softc {
 	SLIST_HEAD(, nbd_conn)	sc_connections;
 	u_int		sc_nconns;
 	u_int		sc_nactive;
-	struct mtx	sc_conns_mtx;
+	struct sx	sc_conns_lock;
 	bool		sc_flushing;
 	struct sx	sc_flush_lock;
 };
@@ -976,7 +976,7 @@ g_nbd_flush_wait(struct g_nbd_softc *sc)
 	struct bio *bp;
 
 	CTR2(KTR_NBD, "%s sc=%p", __func__, sc);
-	mtx_lock(&sc->sc_conns_mtx);
+	sx_slock(&sc->sc_conns_lock);
 	atomic_store_bool(&sc->sc_flushing, true);
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections) {
 		mtx_lock(&nc->nc_inflight_mtx);
@@ -995,7 +995,7 @@ restart:
 		mtx_unlock(&nc->nc_inflight_mtx);
 	}
 	atomic_store_bool(&sc->sc_flushing, false);
-	mtx_unlock(&sc->sc_conns_mtx);
+	sx_sunlock(&sc->sc_conns_lock);
 }
 
 static inline bool
@@ -1152,10 +1152,10 @@ g_nbd_remove_conn(struct g_nbd_softc *sc, struct nbd_conn *nc)
 
 	CTR3(KTR_NBD, "%s sc=%p nc=%p", __func__, sc, nc);
 
-	mtx_lock(&sc->sc_conns_mtx);
+	sx_xlock(&sc->sc_conns_lock);
 	SLIST_REMOVE(&sc->sc_connections, nc, nbd_conn, nc_connections);
 	last = --sc->sc_nactive == 0;
-	mtx_unlock(&sc->sc_conns_mtx);
+	sx_xunlock(&sc->sc_conns_lock);
 	if (last)
 		wakeup(&sc->sc_nactive);
 
@@ -1346,10 +1346,10 @@ g_nbd_add_conn(struct g_nbd_softc *sc, struct socket *so, const char *name,
 	cv_init(&nc->nc_receive_cv, "gnbd:receive");
 	sema_init(&nc->nc_receiver_done, 0, "gnbd:receiver_done");
 
-	mtx_lock(&sc->sc_conns_mtx);
+	sx_xlock(&sc->sc_conns_lock);
 	SLIST_INSERT_HEAD(&sc->sc_connections, nc, nc_connections);
 	sc->sc_nactive++;
-	mtx_unlock(&sc->sc_conns_mtx);
+	sx_xunlock(&sc->sc_conns_lock);
 
 	SOCK_SENDBUF_LOCK(so);
 	so->so_snd.sb_lowat = so->so_snd.sb_hiwat + 1;
@@ -1686,7 +1686,7 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	bio_queue_init(&sc->sc_queue);
 	mtx_init(&sc->sc_queue_mtx, "gnbd:queue", NULL, MTX_DEF);
 	SLIST_INIT(&sc->sc_connections);
-	mtx_init(&sc->sc_conns_mtx, "gnbd:connections", NULL, MTX_DEF);
+	sx_init(&sc->sc_conns_lock, "gnbd:connections");
 	sx_init(&sc->sc_flush_lock, "gnbd:flush");
 	gp->softc = sc;
 	pp = g_new_providerf(gp, "%s", gp->name);
@@ -1764,10 +1764,10 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 		gctl_error(req, "Server doesn't support multiple connections.");
 		return;
 	}
-	mtx_lock(&sc->sc_conns_mtx);
+	sx_xlock(&sc->sc_conns_lock);
 	sc->sc_nconns = nconns;
 	if (sc->sc_nactive == nconns) {
-		mtx_unlock(&sc->sc_conns_mtx);
+		sx_xunlock(&sc->sc_conns_lock);
 		return;
 	}
 	if (sc->sc_nactive > nconns) {
@@ -1779,12 +1779,12 @@ g_nbd_ctl_scale(struct gctl_req *req, struct g_class *mp)
 			if (--n == nconns)
 				break;
 		}
-		mtx_unlock(&sc->sc_conns_mtx);
+		sx_xunlock(&sc->sc_conns_lock);
 		wakeup(&sc->sc_queue);
 		/* The sender threads will take care of the cleanup. */
 		return;
 	}
-	mtx_unlock(&sc->sc_conns_mtx);
+	sx_xunlock(&sc->sc_conns_lock);
 	nsocketsp = gctl_get_paraml(req, "nsockets", sizeof(nsockets));
 	if (nsocketsp == NULL) {
 		gctl_error(req, "No 'nsockets' argument.");
@@ -1829,7 +1829,7 @@ g_nbd_free(struct g_nbd_softc *sc)
 	g_wither_geom(sc->sc_geom, ENXIO);
 	free_unr(g_nbd_unit, sc->sc_unit);
 	sx_destroy(&sc->sc_flush_lock);
-	mtx_destroy(&sc->sc_conns_mtx);
+	sx_destroy(&sc->sc_conns_lock);
 	mtx_destroy(&sc->sc_queue_mtx);
 	g_free(__DECONST(char *, sc->sc_description));
 	g_free(__DECONST(char *, sc->sc_name));
@@ -1854,15 +1854,15 @@ g_nbd_destroy(struct g_nbd_softc *sc)
 	 */
 	g_topology_unlock();
 	g_wither_provider(sc->sc_provider, ENXIO);
-	mtx_lock(&sc->sc_conns_mtx);
+	sx_xlock(&sc->sc_conns_lock);
 	sc->sc_nconns = 0;
 	SLIST_FOREACH(nc, &sc->sc_connections, nc_connections)
 		nbd_conn_degrade_state(nc, NBD_CONN_SOFT_DISCONNECTING);
 	wakeup(&sc->sc_queue);
 	while (sc->sc_nactive > 0)
-		mtx_sleep(&sc->sc_nactive, &sc->sc_conns_mtx, PRIBIO,
+		sx_sleep(&sc->sc_nactive, &sc->sc_conns_lock, PRIBIO,
 		    "gnbd:destroy", 0);
-	mtx_unlock(&sc->sc_conns_mtx);
+	sx_xunlock(&sc->sc_conns_lock);
 	g_nbd_drain_queue(sc);
 	/*
 	 * Must return with topology_lock held and g_nbd_free() needs it for
