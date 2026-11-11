@@ -1510,8 +1510,26 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	host = gctl_get_asciiparam(req, "host");
+	if (host == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'host' argument.");
+		return;
+	}
 	port = gctl_get_asciiparam(req, "port");
+	if (port == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'port' argument.");
+		return;
+	}
 	name = gctl_get_asciiparam(req, "name");
+	if (name == NULL) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "No 'name' argument.");
+		return;
+	}
 	description = gctl_get_asciiparam(req, "description");
 	sizep = gctl_get_paraml(req, "size", sizeof(*sizep));
 	if (sizep == NULL) {
