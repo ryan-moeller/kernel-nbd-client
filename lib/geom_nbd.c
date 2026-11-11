@@ -377,10 +377,10 @@ nbd_client_oldstyle_negotiation(struct nbd_client *client)
 	client->size = handshake.size;
 #define IGNORED_BITS 0xffff0000
 	if ((handshake.flags & IGNORED_BITS) != 0)
-		fprintf(stderr, "Ignoring flags in upper nibble: 0x%08x\n",
+		fprintf(stderr, "Ignoring flags in upper bits: 0x%08x\n",
 		    handshake.flags & IGNORED_BITS);
+	client->transmission_flags = handshake.flags & ~IGNORED_BITS;
 #undef IGNORED_BITS
-	client->handshake_flags = handshake.flags;
 	return (0);
 }
 
