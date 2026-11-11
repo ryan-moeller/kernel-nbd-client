@@ -69,9 +69,10 @@ SYSCTL_INT(_kern_geom_nbd, OID_AUTO, debug, CTLFLAG_RWTUN, &g_nbd_debug, 0,
 
 #define KTR_NBD KTR_SPARE4
 
-static uint32_t maxpayload = 1 << 25;
+#define G_NBD_DEFAULT_MAXPAYLOAD (1 << 25)
+static uint32_t maxpayload = G_NBD_DEFAULT_MAXPAYLOAD;
 SYSCTL_U32(_kern_geom_nbd, OID_AUTO, maxpayload, CTLFLAG_RWTUN, &maxpayload, 0,
-    "Default maximum payload size");
+    "Maximum payload size (0 for no limit beyond the server's)");
 static u_long sendspace = 1536 * 1024;
 SYSCTL_ULONG(_kern_geom_nbd, OID_AUTO, sendspace, CTLFLAG_RWTUN, &sendspace, 0,
     "Default socket send buffer size");
@@ -1607,9 +1608,11 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 		return;
 	}
 	maxpl = *maxpayloadp;
-	maxpl = MIN(maxpl, maxpayload);
-	if (maxpl == 0 /* unset */)
-		maxpl = maxpayload; /* tunable default */
+	/* 0 means no limit from the server or the tunable. */
+	if (maxpayload != 0 && (maxpl == 0 || maxpl > maxpayload))
+		maxpl = maxpayload;
+	if (maxpl == 0)
+		maxpl = G_NBD_DEFAULT_MAXPAYLOAD;
 	/*
 	 * Ensure minimum default sendspace/recvspace sizes can fit the minimum
 	 * block size.  Actual sizes should be much higher (up to sbsize).
