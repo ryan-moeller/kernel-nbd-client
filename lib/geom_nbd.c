@@ -455,7 +455,7 @@ nbd_client_recv_export_info(struct nbd_client *client,
 	if (nbd_client_recv(client, info, SHORT_INFO_LEN) != 0)
 		return (-1);
 	nbd_export_info_ntoh(info);
-	if ((info->transmission_flags & NBD_FLAG_NO_ZEROES) != 0)
+	if ((client->handshake_flags & NBD_FLAG_NO_ZEROES) != 0)
 		return (0);
 	return (nbd_client_recv(client, info->reserved,
 	    sizeof(info->reserved)));
