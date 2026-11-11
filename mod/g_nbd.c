@@ -1614,6 +1614,22 @@ g_nbd_ctl_connect(struct gctl_req *req, struct g_class *mp)
 	if (maxpl == 0)
 		maxpl = G_NBD_DEFAULT_MAXPAYLOAD;
 	/*
+	 * The maximum payload need not be a multiple of the block size or the
+	 * page size.  Split requests on page boundaries where possible, and
+	 * never partway through a block.
+	 */
+	if (maxpl >= PAGE_SIZE)
+		maxpl = rounddown(maxpl, MAX(minbs, PAGE_SIZE));
+	else
+		maxpl = rounddown(maxpl, minbs);
+	if (maxpl == 0) {
+		g_destroy_geom(gp);
+		free_unr(g_nbd_unit, unit);
+		gctl_error(req, "Maximum payload smaller than minimum block "
+		    "size.");
+		return;
+	}
+	/*
 	 * Ensure minimum default sendspace/recvspace sizes can fit the minimum
 	 * block size.  Actual sizes should be much higher (up to sbsize).
 	 */
@@ -2020,10 +2036,12 @@ g_nbd_advance(struct bio *bp, off_t offset)
 	bp->bio_offset += offset;
 	bp->bio_length -= offset;
 	if ((bp->bio_flags & BIO_UNMAPPED) != 0) {
-		bp->bio_ma += offset / PAGE_SIZE;
-		bp->bio_ma_offset += offset;
-		bp->bio_ma_offset %= PAGE_SIZE;
-		bp->bio_ma_n -= offset / PAGE_SIZE;
+		off_t abs = bp->bio_ma_offset + offset;
+
+		bp->bio_ma += abs / PAGE_SIZE;
+		bp->bio_ma_offset = abs % PAGE_SIZE;
+		bp->bio_ma_n = howmany(bp->bio_ma_offset + bp->bio_length,
+		    PAGE_SIZE);
 	} else {
 		bp->bio_data += offset;
 	}
