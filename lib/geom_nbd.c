@@ -60,7 +60,7 @@ static void nbd_scale(struct gctl_req *req, unsigned flags);
 	    "[[-A cacert] -C cert -K key] "
 #endif
 struct g_command class_commands[] = {
-	{ "connect", G_FLAG_LOADKLD, nbd_connect,
+	{ "connect", G_FLAG_VERBOSE | G_FLAG_LOADKLD, nbd_connect,
 	    {
 		{ 'c', "connections", "1", G_TYPE_NUMBER },
 		{ 'n', "name", "", G_TYPE_STRING },
@@ -70,13 +70,13 @@ struct g_command class_commands[] = {
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "[-c num] [-n name] [-p port] "
+	    "[-v] [-c num] [-n name] [-p port] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
 	    "host"
 	},
-	{ "exports", 0, nbd_list,
+	{ "exports", G_FLAG_VERBOSE, nbd_list,
 	    {
 		{ 'p', "port", NBD_DEFAULT_PORT, G_TYPE_STRING },
 #ifdef WITH_OPENSSL
@@ -84,13 +84,13 @@ struct g_command class_commands[] = {
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "[-p port] "
+	    "[-v] [-p port] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
 	    "host"
 	},
-	{ "reconnect", 0, nbd_reconnect,
+	{ "reconnect", G_FLAG_VERBOSE, nbd_reconnect,
 	    {
 		{ 'r', "seconds", "0", G_TYPE_NUMBER },
 #ifdef WITH_OPENSSL
@@ -98,13 +98,13 @@ struct g_command class_commands[] = {
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "[-r seconds] "
+	    "[-v] [-r seconds] "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
 	    "prov"
 	},
-	{ "scale", 0, nbd_scale,
+	{ "scale", G_FLAG_VERBOSE, nbd_scale,
 	    {
 		{ 'c', "connections", NULL, G_TYPE_NUMBER },
 #ifdef WITH_OPENSSL
@@ -112,7 +112,7 @@ struct g_command class_commands[] = {
 #endif
 		G_OPT_SENTINEL
 	    },
-	    "-c num "
+	    "[-v] -c num "
 #ifdef WITH_OPENSSL
 	    TLS_USAGE
 #endif
@@ -144,6 +144,7 @@ struct nbd_client {
 	uint32_t maximum_payload;
 	int socket;
 	long tid;
+	bool verbose;
 #ifdef WITH_OPENSSL
 	SSL_CTX *ssl_ctx;
 #endif
@@ -376,7 +377,7 @@ nbd_client_oldstyle_negotiation(struct nbd_client *client)
 	}
 	client->size = handshake.size;
 #define IGNORED_BITS 0xffff0000
-	if ((handshake.flags & IGNORED_BITS) != 0)
+	if (client->verbose && (handshake.flags & IGNORED_BITS) != 0)
 		fprintf(stderr, "Ignoring flags in upper bits: 0x%08x\n",
 		    handshake.flags & IGNORED_BITS);
 	client->transmission_flags = handshake.flags & ~IGNORED_BITS;
@@ -592,7 +593,6 @@ nbd_client_starttls(struct nbd_client *client)
 	}
 	ssl = SSL_new(client->ssl_ctx);
 	if (ssl == NULL) {
-		/* TODO: verbose flag */
 		ERR_print_errors_fp(stderr);
 		gctl_error(req, "Failed to create TLS connection.");
 		return (-1);
@@ -882,9 +882,6 @@ issue(struct gctl_req *req)
 	return (0);
 }
 
-/*
- * TODO: verbose output
- */
 static void
 nbd_connect(struct gctl_req *req, unsigned flags)
 {
@@ -906,6 +903,7 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 		return;
 	}
 	client.req = req;
+	client.verbose = (flags & G_FLAG_VERBOSE) != 0;
 	client.host = gctl_get_ascii(req, "arg0");
 	client.port = gctl_get_ascii(req, "port");
 #ifdef WITH_OPENSSL
@@ -1098,6 +1096,7 @@ nbd_list(struct gctl_req *req, unsigned flags)
 		return;
 	}
 	client.req = req;
+	client.verbose = (flags & G_FLAG_VERBOSE) != 0;
 	client.host = gctl_get_ascii(req, "arg0");
 	client.port = gctl_get_ascii(req, "port");
 #ifdef WITH_OPENSSL
@@ -1170,7 +1169,7 @@ find_config(struct ggeom *gp, const char *name)
 }
 
 static void
-scale_common(struct gctl_req *req, bool reconnect)
+scale_common(struct gctl_req *req, unsigned flags, bool reconnect)
 {
 	struct nbd_client client = {};
 	struct gmesh mesh;
@@ -1262,6 +1261,7 @@ scale_common(struct gctl_req *req, bool reconnect)
 	nsockets = nconns - nactive;
 	assert(nsockets > 0);
 	client.req = req;
+	client.verbose = (flags & G_FLAG_VERBOSE) != 0;
 	client.host = find_config(gp, "Host");
 	if (client.host == NULL) {
 		gctl_error(req, "Invalid config (missing Host).");
@@ -1323,11 +1323,11 @@ free:
 static void
 nbd_reconnect(struct gctl_req *req, unsigned flags)
 {
-	scale_common(req, true);
+	scale_common(req, flags, true);
 }
 
 static void
 nbd_scale(struct gctl_req *req, unsigned flags)
 {
-	scale_common(req, false);
+	scale_common(req, flags, false);
 }

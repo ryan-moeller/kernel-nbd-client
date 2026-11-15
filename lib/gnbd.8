@@ -20,12 +20,14 @@ utility:
 .Pp
 .Nm
 .Cm connect
+.Op Fl v
 .Op Fl c Ar num
 .Op Fl n Ar name
 .Op Fl p Ar port
 .Ar host
 .Nm
 .Cm connect
+.Op Fl v
 .Op Fl c Ar num
 .Op Fl n Ar name
 .Op Fl p Ar port
@@ -35,10 +37,12 @@ utility:
 .Ar host
 .Nm
 .Cm reconnect
+.Op Fl v
 .Op Fl r Ar seconds
 .Ar prov
 .Nm
 .Cm reconnect
+.Op Fl v
 .Op Fl r Ar seconds
 .Op Fl A Ar cacert
 .Fl C Ar cert
@@ -46,10 +50,12 @@ utility:
 .Ar prov
 .Nm
 .Cm scale
+.Op Fl v
 .Fl c Ar num
 .Ar prov
 .Nm
 .Cm scale
+.Op Fl v
 .Fl c Ar num
 .Op Fl A Ar cacert
 .Fl C Ar cert
@@ -60,10 +66,12 @@ utility:
 .Ar prov
 .Nm
 .Cm exports
+.Op Fl v
 .Op Fl p Ar port
 .Ar host
 .Nm
 .Cm exports
+.Op Fl v
 .Op Fl p Ar port
 .Op Fl A Ar cacert
 .Fl C Ar cert
@@ -185,6 +193,12 @@ See
 .It Cm unload
 See
 .Xr geom 8 .
+.El
+.Pp
+Additional options:
+.Bl -tag -width ".Fl v"
+.It Fl v
+Be more verbose.
 .El
 .Sh TLS
 All TLS certificates and keys must be in PEM format.
