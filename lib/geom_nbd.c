@@ -503,6 +503,73 @@ nbd_client_recv_option_reply(struct nbd_client *client,
 	return (0);
 }
 
+static const char *
+nbd_option_error_str(int32_t type)
+{
+	switch (type) {
+	case NBD_REPLY_ERROR_UNSUPPORTED:
+		return ("option not supported");
+	case NBD_REPLY_ERROR_POLICY:
+		return ("forbidden by server policy");
+	case NBD_REPLY_ERROR_INVALID:
+		return ("invalid option");
+	case NBD_REPLY_ERROR_PLATFORM:
+		return ("not supported on server platform");
+	case NBD_REPLY_ERROR_TLS_REQUIRED:
+		return ("TLS required");
+	case NBD_REPLY_ERROR_UNKNOWN:
+		return ("unknown export");
+	case NBD_REPLY_ERROR_SHUTDOWN:
+		return ("server shutting down");
+	case NBD_REPLY_ERROR_BLOCK_SIZE_REQD:
+		return ("block size constraints required");
+	default:
+		return (NULL);
+	}
+}
+
+/*
+ * Receive the optional message following an option error reply and report
+ * the error as "<what> failed".  If unsup_ok is set, an unsupported option
+ * is not treated as an error: the message is discarded and 0 is returned so
+ * the caller can fall back.  Otherwise returns -1.
+ */
+static int
+nbd_client_recv_option_error(struct nbd_client *client,
+    const struct nbd_option_reply *reply, const char *what, bool unsup_ok)
+{
+	char codebuf[sizeof("error 0xffffffff")];
+	const char *errstr;
+	char *msg = NULL;
+
+	assert((reply->type & NBD_REPLY_ERROR) != 0);
+	if (reply->length > 0) {
+		msg = malloc(reply->length);
+		assert(msg != NULL);
+		if (nbd_client_recv(client, msg, reply->length) != 0) {
+			free(msg);
+			return (-1);
+		}
+	}
+	if (unsup_ok && reply->type == NBD_REPLY_ERROR_UNSUPPORTED) {
+		free(msg);
+		return (0);
+	}
+	errstr = nbd_option_error_str(reply->type);
+	if (errstr == NULL) {
+		snprintf(codebuf, sizeof(codebuf), "error %#x",
+		    (uint32_t)reply->type);
+		errstr = codebuf;
+	}
+	if (msg != NULL)
+		gctl_error(client->req, "%s failed: %s: %.*s", what, errstr,
+		    (int)reply->length, msg);
+	else
+		gctl_error(client->req, "%s failed: %s", what, errstr);
+	free(msg);
+	return (-1);
+}
+
 #ifdef WITH_OPENSSL
 static int
 nbd_client_starttls(struct nbd_client *client)
@@ -516,6 +583,9 @@ nbd_client_starttls(struct nbd_client *client)
 	if (nbd_client_recv_option_reply(client, &reply, NBD_OPTION_STARTTLS)
 	    != 0)
 		return (-1);
+	if ((reply.type & NBD_REPLY_ERROR) != 0)
+		return (nbd_client_recv_option_error(client, &reply,
+		    "TLS negotiation", false));
 	if (reply.type != NBD_REPLY_ACK) {
 		gctl_error(req, "Failed to negotiate TLS.");
 		return (-1);
@@ -641,30 +711,10 @@ nbd_client_negotiate_options(struct nbd_client *client, bool first)
 			return (0);
 		}
 		if ((reply.type & NBD_REPLY_ERROR) != 0) {
-			if (reply.length > 0) {
-				buf = malloc(reply.length);
-				assert(buf != NULL);
-				if (nbd_client_recv(client, buf, reply.length)
-				    != 0)
-					return (-1);
-				switch (reply.type) {
-				case NBD_REPLY_ERROR_UNSUPPORTED:
-				case NBD_REPLY_ERROR_TLS_REQUIRED:
-					break;
-				default:
-					gctl_error(req,
-					    "Negotiation failed: %.*s",
-					    reply.length, buf);
-					break;
-				}
-				free(buf);
-			}
-			if (reply.type == NBD_REPLY_ERROR_TLS_REQUIRED)
-				gctl_error(req, "Negotiation failed: "
-				    "TLS required for this export");
-			if (reply.type == NBD_REPLY_ERROR_UNSUPPORTED)
-				return (nbd_client_negotiate_fallback(client));
-			return (-1);
+			if (nbd_client_recv_option_error(client, &reply,
+			    "Negotiation", true) != 0)
+				return (-1);
+			return (nbd_client_negotiate_fallback(client));
 		}
 		if (reply.type != NBD_REPLY_INFO) {
 			gctl_error(req, "Unexpected option reply type.");
@@ -949,24 +999,9 @@ nbd_client_list(struct nbd_client *client, nbd_client_list_cb cb, void *ctx)
 			return (-1);
 		if (reply.type == NBD_REPLY_ACK)
 			break;
-		if ((reply.type & NBD_REPLY_ERROR) != 0) {
-			if (reply.length == 0)
-				gctl_error(req, "Listing exports failed (%d)",
-				    reply.type);
-			else {
-				uint8_t *buf;
-
-				buf = malloc(reply.length);
-				assert(buf != NULL);
-				if (nbd_client_recv(client, buf, reply.length)
-				    != 0)
-					return (-1);
-				gctl_error(req, "Listing exports failed: %.*s",
-				    reply.length, buf);
-				free(buf);
-			}
-			return (-1);
-		}
+		if ((reply.type & NBD_REPLY_ERROR) != 0)
+			return (nbd_client_recv_option_error(client, &reply,
+			    "Listing exports", false));
 		if (reply.type != NBD_REPLY_SERVER) {
 			gctl_error(req, "Unexpected option reply type.");
 			return (-1);
@@ -1038,23 +1073,9 @@ nbd_client_abort(struct nbd_client *client)
 		return (-1);
 	if (reply.type == NBD_REPLY_ACK)
 		return (0);
-	if ((reply.type & NBD_REPLY_ERROR) != 0) {
-		if (reply.length == 0)
-			gctl_error(req, "Abort option failed (%d)", reply.type);
-		else {
-			uint8_t *buf;
-
-			buf = malloc(reply.length);
-			assert(buf != NULL);
-			if (nbd_client_recv(client, buf, reply.length)
-			    != 0)
-				return (-1);
-			gctl_error(req, "Abort option failed: %.*s",
-			    reply.length, buf);
-			free(buf);
-		}
-		return (-1);
-	}
+	if ((reply.type & NBD_REPLY_ERROR) != 0)
+		return (nbd_client_recv_option_error(client, &reply,
+		    "Abort option", false));
 	gctl_error(req, "Unexpected option reply type.");
 	return (-1);
 }
