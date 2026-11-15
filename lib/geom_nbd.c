@@ -740,7 +740,6 @@ nbd_client_negotiate(struct nbd_client *client, bool first)
 {
 	struct nbd_handshake handshake;
 	struct gctl_req *req = client->req;
-	ssize_t len;
 
 	if (nbd_client_recv(client, &handshake, sizeof(handshake)) != 0)
 		return (-1);
@@ -841,7 +840,6 @@ nbd_connect(struct gctl_req *req, unsigned flags)
 {
 	char provider[PATH_MAX];
 	struct nbd_client client = {};
-	const char *name;
 	int *sockets = NULL;
 	intmax_t nconns;
 	int nargs;
@@ -921,8 +919,6 @@ nbd_client_list(struct nbd_client *client, nbd_client_list_cb cb, void *ctx)
 	struct gctl_req *req = client->req;
 	char *name, *description;
 	size_t resid;
-	ssize_t len;
-	int s = client->socket;
 
 	if (nbd_client_recv(client, &handshake, sizeof(handshake)) != 0)
 		return (-1);
@@ -1034,7 +1030,6 @@ static int
 nbd_client_abort(struct nbd_client *client)
 {
 	struct nbd_option_reply reply;
-	struct nbd_option_reply_server server_export;
 	struct gctl_req *req = client->req;
 
 	if (nbd_client_send_option(client, NBD_OPTION_ABORT, NULL, 0) != 0)
